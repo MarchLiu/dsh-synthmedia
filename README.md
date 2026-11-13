@@ -402,9 +402,10 @@ Probes: `os.cpus/totalmem/arch/platform`、目标目录 `fs.statfs`、darwin
 ### 离线模型下载
 
 - 清单：`<dataDir>/downloads.json`（用户可编辑）。首次启动自动写入默认清单：
-  MiniMax H3 全套官方文件的逐文件条目（默认变体 **H3-Base**，即 HF 仓库根
-  pipeline；H3-Context-IR / H3-Regenerate-2K 是**同权重的推理期变体**，按官方
-  `scripts/readme/*.sh` 配方运行即可，无需另行下载权重）。
+  MiniMax H3 全套官方文件的逐文件条目（开源发布仅含 **H3-Base**，即 HF 仓库根
+  pipeline 的 FL2VA / Ref2VA 两个 checkpoint；官方文档明确 H3-Context-IR 是
+  托管预处理系统、未随开源发布，H3-Regenerate-2K "not yet open-sourced"，
+  二者均无独立权重可下载）。
 - 官方下载源（2026-08-03 开源）：
   - Hugging Face（默认源）：https://huggingface.co/MiniMaxAI/MiniMax-H3
     （文件 URL 形如 `.../resolve/main/transformer/diffusion_pytorch_model-00001-of-00014.safetensors`）
@@ -413,7 +414,7 @@ Probes: `os.cpus/totalmem/arch/platform`、目标目录 `fs.statfs`、darwin
   - 本地部署指南：https://platform.minimax.io/docs/guides/local-deploy-h3 ；仓库：https://github.com/MiniMax-AI/MiniMax-H3
 - 文件集：根 pipeline 全部文件（transformer 14 分片 + transformer_ref 14 分片
   （reference 子管线）+ text_encoder 14 分片 + vae 3 分片 + audio_vae +
-  tokenizer/processor 配置 + model_index 等，约 77 个文件，BF16 Safetensors，
+  tokenizer/processor 配置 + model_index 等，共 79 个文件，BF16 Safetensors，
   约 33.1B 参数/仓库总占用 ≈ 355 GiB 含 FL2VA/Ref2VA 子目录副本）。默认清单
   **不含** FL2VA/Ref2VA 子目录（与根管线组件重复），需要时自行在
   downloads.json 补条目。
@@ -423,11 +424,11 @@ Probes: `os.cpus/totalmem/arch/platform`、目标目录 `fs.statfs`、darwin
   设置表单改 `dataDir`）。注意：每个条目下载为平铺的 `<id>.bin` 文件，文件名
   不保留仓库子目录结构；如需完整 diffusers 目录布局，建议直接用
   `huggingface-cli download MiniMaxAI/MiniMax-H3`，本清单适合单文件补拉。
-- 目标目录：`<dataDir>/downloads/`（默认 `synthmedia-data/downloads/`，可在
-  设置表单改 `dataDir`）。
 - 断点续传：字节先落 `<id>.bin.part`；重启任务时若存在合法 .part 则发
   `Range: bytes=<size>-` 续传（服务器不支持 Range 时自动从头）；完成后原子
-  rename 为 `<id>.bin`；取消/失败保留 .part。
+  rename 为 `<id>.bin`；取消/失败保留 .part。HF/ModelScope 的 resolve URL 均
+  302 重定向到 CDN，下载器自动跟随最多 5 次重定向（Range 头逐跳保留），每次
+  重定向目标都过 SSRF 检查（私有/回环地址拒绝）；最终响应仍要求 200/206。
 - 后台与取消：复用 `ctx.jobs`（宿主 JobRegistry，kind
   `synthmedia-download`），进度（百分比/速度/剩余）经 `updateProgress` 进入
   宿主 Jobs UI； Jobs UI 的取消与配置页取消同一 AbortController。

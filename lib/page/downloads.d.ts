@@ -25,7 +25,7 @@ import type { HostJobRegistry } from '../jobs.js';
 export interface DownloadEntry {
     readonly id: string;
     readonly name: string;
-    /** Operator-filled http(s) URL; empty in the shipped placeholder manifest. */
+    /** Operator-filled http(s) URL (HF/ModelScope `resolve` urls redirect to the CDN); empty disables the entry. */
     readonly url: string;
     /** Advertised size in bytes when known (0/absent = unknown until headers). */
     readonly bytes?: number;
@@ -66,7 +66,20 @@ export interface ByteSource {
         stream: AsyncIterable<Uint8Array>;
     }>;
 }
-/** Default ByteSource over node:http(s) GET with a Range header on resume. */
+/**
+ * Build the default ByteSource over node:http(s) GET with a Range header on
+ * resume. Follows up to MAX_REDIRECTS 301/302/307/308 hops (HF/ModelScope
+ * resolve URLs 302 to their CDN), re-sending the Range header on every hop.
+ * Each redirect Location is SSRF-guarded (loopback/private/link-local refused
+ * via the shared isPrivateHost check) so a public URL cannot bounce the
+ * downloader at an internal address; `allowRedirectHost` can only WIDEN that
+ * guard (tests use it to point at a local mock origin); the final response
+ * must still be 200/206 (enforced by DownloadManager.run).
+ */
+export declare function createHttpByteSource(opts?: {
+    allowRedirectHost?: (hostname: string) => boolean;
+}): ByteSource;
+/** Production byte source: strict SSRF guard on every redirect hop. */
 export declare const httpByteSource: ByteSource;
 /**
  * Download manager. All state is in-memory (a restarted host restarts
