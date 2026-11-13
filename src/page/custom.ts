@@ -21,8 +21,26 @@ export interface CustomProfileInput {
   readonly baseUrl: string;
   readonly authEnv?: string;
   readonly authStyle?: 'bearer' | 'basic' | 'raw' | 'none';
+  /** Custom header that carries the credential (e.g. Ark TTS `X-Api-Key`). */
+  readonly authHeader?: string;
   readonly models: readonly string[];
   readonly modalities: ReadonlyArray<'video' | 'image' | 'audio'>;
+  /** Optional path overrides; per-protocol defaults apply when omitted. */
+  readonly paths?: {
+    readonly submit: string;
+    readonly status?: string;
+    readonly content?: string;
+    readonly cancel?: string;
+  };
+  /** Ark TTS tunables (required for `audio` modality: voice id). */
+  readonly tts?: {
+    readonly speaker: string;
+    readonly uid?: string;
+    readonly format?: string;
+    readonly sampleRate?: number;
+    /** X-Api-Resource-Id header value, e.g. `seed-tts-2.0`. */
+    readonly resourceId?: string;
+  };
   readonly protocolVerified?: boolean;
   readonly liveVerified?: boolean;
   readonly online?: boolean;
@@ -99,6 +117,50 @@ function validateOne(item: unknown, index: number): CustomProfileInput | string 
     ? rec['authStyle']
     : authEnv ? 'bearer' : 'none') as 'bearer' | 'basic' | 'raw' | 'none';
   if (authStyle !== 'none' && !authEnv) return `条目 '${id}'：authStyle '${authStyle}' 需要提供凭据环境变量名 authEnv`;
+  const authHeader = typeof rec['authHeader'] === 'string' && rec['authHeader'] !== '' ? rec['authHeader'] : undefined;
+  // Optional path overrides: absolute-path strings only; the secret-value
+  // guard above already rejects any key that smells like a credential.
+  let paths: CustomProfileInput['paths'] | undefined;
+  if (rec['paths'] !== undefined) {
+    const rawPaths = rec['paths'];
+    if (rawPaths === null || typeof rawPaths !== 'object' || Array.isArray(rawPaths)) {
+      return `条目 '${id}'：paths 必须是对象`;
+    }
+    const rp = rawPaths as Record<string, unknown>;
+    const submit = rp['submit'];
+    if (typeof submit !== 'string' || !submit.startsWith('/')) return `条目 '${id}'：paths.submit 必须是以 / 开头的路径`;
+    const parsed: { submit: string; status?: string; content?: string; cancel?: string } = { submit };
+    for (const key of ['status', 'content', 'cancel'] as const) {
+      const v = rp[key];
+      if (v === undefined) continue;
+      if (typeof v !== 'string' || !v.startsWith('/')) return `条目 '${id}'：paths.${key} 必须是以 / 开头的路径`;
+      parsed[key] = v;
+    }
+    paths = parsed;
+  }
+  // Optional Ark TTS tunables: names only carry no secret; `speaker` is a
+  // voice id required by the Ark audio surface.
+  let tts: CustomProfileInput['tts'] | undefined;
+  if (rec['tts'] !== undefined) {
+    const rawTts = rec['tts'];
+    if (rawTts === null || typeof rawTts !== 'object' || Array.isArray(rawTts)) {
+      return `条目 '${id}'：tts 必须是对象`;
+    }
+    const rt = rawTts as Record<string, unknown>;
+    if (typeof rt['speaker'] !== 'string' || rt['speaker'] === '') return `条目 '${id}'：tts.speaker（音色 id）必填`;
+    if (rt['sampleRate'] !== undefined && (typeof rt['sampleRate'] !== 'number' || !Number.isFinite(rt['sampleRate']))) {
+      return `条目 '${id}'：tts.sampleRate 必须是数字`;
+    }
+    if (rt['format'] !== undefined && rt['format'] !== '' && !['mp3', 'pcm', 'ogg_opus'].includes(rt['format'] as string)) {
+      return `条目 '${id}'：tts.format 必须是 mp3 / pcm / ogg_opus`;
+    }
+    tts = {
+      speaker: rt['speaker'],
+      ...(typeof rt['uid'] === 'string' && rt['uid'] !== '' ? { uid: rt['uid'] } : {}),
+      ...(typeof rt['format'] === 'string' && rt['format'] !== '' ? { format: rt['format'] } : {}),
+      ...(typeof rt['sampleRate'] === 'number' ? { sampleRate: rt['sampleRate'] } : {}),
+    };
+  }
   const profile: CustomProfileInput = {
     id,
     protocol,
@@ -107,6 +169,9 @@ function validateOne(item: unknown, index: number): CustomProfileInput | string 
     modalities,
     ...(authEnv ? { authEnv } : {}),
     authStyle,
+    ...(authHeader ? { authHeader } : {}),
+    ...(paths ? { paths } : {}),
+    ...(tts ? { tts } : {}),
     ...(rec['protocolVerified'] === true ? { protocolVerified: true } : {}),
     ...(rec['liveVerified'] === true ? { liveVerified: true } : {}),
     ...(rec['online'] === false ? { online: false } : {}),
@@ -142,9 +207,22 @@ export function backendOf(p: CustomProfileInput): BackendConfig {
     baseUrl: p.baseUrl,
     ...(p.authEnv ? { authEnv: p.authEnv } : {}),
     authStyle: p.authStyle ?? (p.authEnv ? 'bearer' : 'none'),
+    ...(p.authHeader ? { authHeader: p.authHeader } : {}),
     online: p.online !== false,
     timeoutMs: 600_000,
-    ...(protocolPaths[p.protocol] ? { paths: protocolPaths[p.protocol] } : {}),
+    ...(p.paths ? { paths: { submit: p.paths.submit, status: p.paths.status ?? '', content: p.paths.content, cancel: p.paths.cancel } } : {}),
+    ...(p.tts
+      ? {
+          tts: {
+            speaker: p.tts.speaker,
+            uid: p.tts.uid,
+            format: p.tts.format as 'mp3' | 'pcm' | 'ogg_opus' | undefined,
+            sampleRate: p.tts.sampleRate,
+            resourceId: p.tts.resourceId,
+          },
+        }
+      : {}),
+    ...(protocolPaths[p.protocol] && !p.paths ? { paths: protocolPaths[p.protocol] } : {}),
     protocolVerified: p.protocolVerified === true,
     liveVerified: p.liveVerified === true,
   };

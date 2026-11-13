@@ -21,6 +21,10 @@ import { buildSynthMediaTools } from './tools.js';
 import { envCredentialResolver, type CredentialResolver } from './http.js';
 import { parseCustomProfiles } from './page/custom.js';
 import { mergeCustomBackends } from './page/custom.js';
+import { parseOrder, parseEnabledResources, parseEnabledTools, orderProfiles, resolveDefaultProfile } from './page/priority.js';
+import { gateBackends } from './page/ecosystems.js';
+import type { EcosystemGate } from './page/ecosystems.js';
+import { detectToolchain } from './page/toolchain.js';
 import {
   createPageServices,
   runPageCommand,
@@ -55,6 +59,9 @@ export const Config = z.object({
   dataDir: z.string().default('synthmedia-data').description('插件数据目录：自定义下载清单 downloads.json 与模型文件存放处。'),
   providersPatchPath: z.string().default('').description('「从 DSH providers 导入」数据源：profile cordis.patch.yml 的绝对路径（只读）。留空则导入面板不可用。'),
   customProfiles: z.string().default('[]').volatile().description('用户自定义 ProviderProfile（JSON 数组字符串，含 schema 校验；损坏自动忽略并提示）。配置页保存后热生效，无需重载。'),
+  providerOrder: z.string().default('[]').volatile().description('ProviderProfile 优先级（JSON 数组字符串，profile id 顺序 = 优先级，靠前优先；未列入的保持既有顺序排在其后）。热生效。'),
+  enabledDshResources: z.string().default('[]').volatile().description('从 DSH 订阅账户勾选、允许 SynthMedia 使用的媒体模型（JSON 数组字符串，元素形如 "providerId::modelId"）。热生效。'),
+  enabledTools: z.string().default('[]').volatile().description('启用的本地工具链（JSON 数组字符串，取值 ffmpeg|imagemagick|gimp|blender），capabilities 输出 tools 段。热生效。'),
   defaultTimeoutMs: z.number().default(1_800_000).description('默认任务超时（毫秒）。'),
 }).description('SynthMedia 配置');
 
@@ -146,9 +153,9 @@ function liveConfigView(config: Record<string, unknown>): Record<string, unknown
 export function apply(ctx: SynthMediaContext, config: Record<string, unknown> = {}): void {
   const live = liveConfigView(config);
   const warn = (message: string) => readService<{ warn?: (m: string) => void }>(ctx, 'logger')?.warn?.(message);
-  // Runtime factory: invoked once at apply time and again on every
-  // `customProfiles` volatile update (loader/volatile-update), so GUI profile
-  // saves reach the JobManager registry without a plugin remount.
+  // Runtime factory: invoked once at apply time and again on every volatile
+  // update (loader/volatile-update), so GUI profile/routing saves reach the
+  // JobManager registry without a plugin remount.
   const buildRuntime = (): JobManager | null => {
     // Custom profiles (config-page persistence) merge on top of the built-in
     // presets + profile-patch overrides; corrupt JSON degrades to a warning,
@@ -210,20 +217,69 @@ export function apply(ctx: SynthMediaContext, config: Record<string, unknown> = 
     });
   }
 
-  for (const definition of buildSynthMediaTools(jobsForward)) {
+  // Capabilities enrichment (phase one): priority ranks, effective-default
+  // marks and ecosystem gates are recomputed from the live config whenever it
+  // can change — at apply time and on every volatile update — while the
+  // `tools` section probes lazily per call. The extras object identity stays
+  // stable, so the already-registered tool definitions observe each refresh
+  // (tool registration happens once and is never repeated).
+  const capsExtras: {
+    priority?: Record<string, number>;
+    effectiveDefault?: Set<string>;
+    ecosystem?: Record<string, EcosystemGate>;
+    tools?: () => ReturnType<typeof detectToolchain>;
+  } = {
+    tools: async () => {
+      const { tools: enabled } = parseEnabledTools(live['enabledTools']);
+      return detectToolchain(enabled);
+    },
+  };
+  const refreshCapabilitiesExtras = (): void => {
+    const { order } = parseOrder(live['providerOrder']);
+    const priority: Record<string, number> = {};
+    const effectiveDefault = new Set<string>();
+    let ecosystem: Record<string, EcosystemGate> = {};
+    let resolved;
+    try {
+      resolved = effectiveConfig({ ...live }).config;
+    } catch {
+      resolved = undefined;
+    }
+    if (resolved) {
+      const gates = gateBackends(resolved.backends);
+      ecosystem = gates;
+      order.forEach((id, i) => {
+        if (resolved!.backends[id]) priority[id] = i + 1;
+      });
+      const modalities = new Set<string>();
+      for (const b of Object.values(resolved.backends)) for (const m of b.modalities) modalities.add(m);
+      for (const m of modalities) {
+        const d = resolveDefaultProfile(Object.values(resolved.backends), m, order, (p) => gates[p.id]?.supported === true);
+        if (d) effectiveDefault.add(d.id);
+      }
+    }
+    capsExtras.priority = priority;
+    capsExtras.effectiveDefault = effectiveDefault;
+    capsExtras.ecosystem = ecosystem;
+  };
+  refreshCapabilitiesExtras();
+
+  for (const definition of buildSynthMediaTools(jobsForward, capsExtras)) {
     ctx.tools?.register(definition);
   }
 
-  // Volatile hot reload: a GUI save of `customProfiles` rebuilds the
+  // Volatile hot reload: a GUI save of any volatile field rebuilds the
   // JobManager + backend registry in place (the running fiber keeps its live
   // `{get}` reference; in-flight jobs of the old instance are dropped by
-  // design — the profile SET changed). Other volatile paths never exist, so
-  // any other update is ignored here.
+  // design — the profile SET or routing changed). All four keys are volatile
+  // in the Config schema above; other updates are ignored here.
+  const VOLATILE_REBUILD_KEYS = new Set(['customProfiles', 'providerOrder', 'enabledDshResources', 'enabledTools']);
   if (typeof ctx.on === 'function') {
     ctx.on('loader/volatile-update', (paths: unknown) => {
-      if (!Array.isArray(paths) || !paths.some((p) => Array.isArray(p) && p[0] === 'customProfiles')) return;
+      if (!Array.isArray(paths) || !paths.some((p) => Array.isArray(p) && typeof p[0] === 'string' && VOLATILE_REBUILD_KEYS.has(p[0]))) return;
       const next = buildRuntime();
       if (!next) return;
+      refreshCapabilitiesExtras();
       const old = jobsRef.current;
       jobsRef.current = next;
       next.attachHostJobs(hostJobsRef.current);
@@ -321,3 +377,11 @@ export { collectSystemReport, assessH3, assessDimension, DEFAULT_H3_THRESHOLDS }
 export type { SystemReport, H3Assessment, H3Thresholds, DimensionAssessment, Verdict } from './page/system.js';
 export { DownloadManager, defaultManifest, validateManifest, httpByteSource } from './page/downloads.js';
 export type { DownloadEntry, DownloadProgress, DownloadManifest, ByteSource } from './page/downloads.js';
+export {
+  parseOrder, parseEnabledResources, parseEnabledTools, orderProfiles, resolveDefaultProfile, TOOL_NAMES,
+} from './page/priority.js';
+export type { ToolName, PriorityProfile } from './page/priority.js';
+export { SUPPORTED_ECOSYSTEMS, modelEcosystem, modelGate, profileGate, gateBackends } from './page/ecosystems.js';
+export type { MediaEcosystem, EcosystemGate } from './page/ecosystems.js';
+export { detectToolchain } from './page/toolchain.js';
+export type { ToolchainProbes, ToolStatus } from './page/toolchain.js';

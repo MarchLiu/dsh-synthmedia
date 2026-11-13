@@ -5,8 +5,26 @@ export interface CustomProfileInput {
     readonly baseUrl: string;
     readonly authEnv?: string;
     readonly authStyle?: 'bearer' | 'basic' | 'raw' | 'none';
+    /** Custom header that carries the credential (e.g. Ark TTS `X-Api-Key`). */
+    readonly authHeader?: string;
     readonly models: readonly string[];
     readonly modalities: ReadonlyArray<'video' | 'image' | 'audio'>;
+    /** Optional path overrides; per-protocol defaults apply when omitted. */
+    readonly paths?: {
+        readonly submit: string;
+        readonly status?: string;
+        readonly content?: string;
+        readonly cancel?: string;
+    };
+    /** Ark TTS tunables (required for `audio` modality: voice id). */
+    readonly tts?: {
+        readonly speaker: string;
+        readonly uid?: string;
+        readonly format?: string;
+        readonly sampleRate?: number;
+        /** X-Api-Resource-Id header value, e.g. `seed-tts-2.0`. */
+        readonly resourceId?: string;
+    };
     readonly protocolVerified?: boolean;
     readonly liveVerified?: boolean;
     readonly online?: boolean;

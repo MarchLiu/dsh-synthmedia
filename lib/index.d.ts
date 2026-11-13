@@ -23,12 +23,18 @@ export declare const Config: z<Schemastery.ObjectS<NoInfer<{
     dataDir: z<string, string, "defined">;
     providersPatchPath: z<string, string, "defined">;
     customProfiles: z<string, string, "volatile-defined">;
+    providerOrder: z<string, string, "volatile-defined">;
+    enabledDshResources: z<string, string, "volatile-defined">;
+    enabledTools: z<string, string, "volatile-defined">;
     defaultTimeoutMs: z<number, number, "defined">;
 }>>, Schemastery.ObjectT<NoInfer<{
     outputDir: z<string, string, "defined">;
     dataDir: z<string, string, "defined">;
     providersPatchPath: z<string, string, "defined">;
     customProfiles: z<string, string, "volatile-defined">;
+    providerOrder: z<string, string, "volatile-defined">;
+    enabledDshResources: z<string, string, "volatile-defined">;
+    enabledTools: z<string, string, "volatile-defined">;
     defaultTimeoutMs: z<number, number, "defined">;
 }>>, "plain">;
 /** Structural subset of the DSH credential provider (`ctx.credentials`). */
@@ -80,3 +86,9 @@ export { collectSystemReport, assessH3, assessDimension, DEFAULT_H3_THRESHOLDS }
 export type { SystemReport, H3Assessment, H3Thresholds, DimensionAssessment, Verdict } from './page/system.js';
 export { DownloadManager, defaultManifest, validateManifest, httpByteSource } from './page/downloads.js';
 export type { DownloadEntry, DownloadProgress, DownloadManifest, ByteSource } from './page/downloads.js';
+export { parseOrder, parseEnabledResources, parseEnabledTools, orderProfiles, resolveDefaultProfile, TOOL_NAMES, } from './page/priority.js';
+export type { ToolName, PriorityProfile } from './page/priority.js';
+export { SUPPORTED_ECOSYSTEMS, modelEcosystem, modelGate, profileGate, gateBackends } from './page/ecosystems.js';
+export type { MediaEcosystem, EcosystemGate } from './page/ecosystems.js';
+export { detectToolchain } from './page/toolchain.js';
+export type { ToolchainProbes, ToolStatus } from './page/toolchain.js';

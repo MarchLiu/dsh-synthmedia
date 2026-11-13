@@ -123,9 +123,11 @@ test('page/system: H3 threshold tiers (充足/勉强/不足) and probe-failure d
   // Memory between the 48 GiB floor and the 73 GiB need → 勉强.
   assert.equal(assessH3(fakeReport({ totalMemBytes: 64 * 1024 ** 3 })).overall, '勉强');
   assert.equal(assessH3(fakeReport({ totalMemBytes: 32 * 1024 ** 3 })).overall, '不足');
-  // Disk: below the 45 GiB estimate → 不足.
-  assert.equal(assessH3(fakeReport({ freeDiskBytes: 40 * 1024 ** 3 })).overall, '不足');
-  assert.equal(assessH3(fakeReport({ freeDiskBytes: 60 * 1024 ** 3 })).overall, '勉强');
+  // Disk: the lightest usable set is the GGUF Q4 combo (~33 GiB measured), so
+  // the 不足 floor is 40 GiB and 480 GiB (whole BF16 repo + margin) is 充足.
+  assert.equal(assessH3(fakeReport({ freeDiskBytes: 30 * 1024 ** 3 })).overall, '不足');
+  assert.equal(assessH3(fakeReport({ freeDiskBytes: 200 * 1024 ** 3 })).overall, '勉强');
+  assert.equal(assessH3(fakeReport({ freeDiskBytes: 600 * 1024 ** 3 })).overall, '充足');
   // Cores below 4 → 不足; missing runtimes downgrade the runtime dimension.
   assert.equal(assessH3(fakeReport({ cpuCount: 2 })).overall, '不足');
   const missing = assessH3(fakeReport({ runtimes: { python: undefined, uv: undefined, node: 'x' } }));

@@ -6,6 +6,8 @@
  */
 import type { HostJobOwner, JobManager } from './jobs.js';
 import { SynthError, sanitizeUnknown } from './errors.js';
+import type { ToolStatus } from './page/toolchain.js';
+import type { EcosystemGate } from './page/ecosystems.js';
 
 /**
  * Structural subset of the DSH tool execution context used here. `agent` is
@@ -95,7 +97,27 @@ async function safeRun<T>(body: () => Promise<T>): Promise<T> {
   }
 }
 
-export function buildSynthMediaTools(jobs: JobManager): Array<{
+/**
+ * Optional capabilities enrichment (phase-one routing surface). All maps are
+ * computed by the CALLER at call time from the live config — this module
+ * stays free of config imports. Existing output fields keep their meaning;
+ * the new fields are pure additions.
+ */
+export interface CapabilitiesExtras {
+  /** backend id → 1-based priority (position in providerOrder). Absent = unranked. */
+  readonly priority?: Readonly<Record<string, number>>;
+  /** backend ids that are the effective default for at least one modality. */
+  readonly effectiveDefault?: ReadonlySet<string>;
+  /** backend id → ecosystem gate (ecosystem / supported / reason). */
+  readonly ecosystem?: Readonly<Record<string, EcosystemGate>>;
+  /** Local toolchain statuses for the `tools` section. */
+  readonly tools?: () => Promise<readonly ToolStatus[]>;
+}
+
+export function buildSynthMediaTools(
+  jobs: JobManager,
+  extras?: CapabilitiesExtras,
+): Array<{
   name: string;
   description: string;
   parameters: unknown;
@@ -113,7 +135,8 @@ export function buildSynthMediaTools(jobs: JobManager): Array<{
         schema: {
           type: 'object',
           properties: {
-            backends: { type: 'array', items: { type: 'object', properties: { id: { type: 'string' }, protocol: { type: 'string' }, modalities: { type: 'array', items: { type: 'string' } }, models: { type: 'array', items: { type: 'string' } }, modelCapabilities: { type: 'object' }, online: { type: 'boolean' }, protocolVerified: { type: 'boolean' }, realSubmitAllowed: { type: 'boolean' } } } },
+            backends: { type: 'array', items: { type: 'object', properties: { id: { type: 'string' }, protocol: { type: 'string' }, modalities: { type: 'array', items: { type: 'string' } }, models: { type: 'array', items: { type: 'string' } }, modelCapabilities: { type: 'object' }, online: { type: 'boolean' }, protocolVerified: { type: 'boolean' }, realSubmitAllowed: { type: 'boolean' }, priority: { type: 'number', description: '1-based position in providerOrder (absent = unranked)' }, effectiveDefault: { type: 'boolean', description: 'default profile for at least one modality under the priority routing' }, ecosystem: { type: 'string', description: 'ecosystem id from the ecosystem gate (one of the supported ecosystem ids, or other when unclassified)' }, supported: { type: 'boolean', description: 'ecosystem gate: false = not default-routable' }, ecosystemReason: { type: 'string' } } } },
+            tools: { type: 'array', items: { type: 'object', properties: { name: { type: 'string' }, enabled: { type: 'boolean' }, installed: { type: 'boolean' }, path: { type: 'string' }, version: { type: 'string' }, installHint: { type: 'string' } } }, description: 'local toolchain detection (ffmpeg/imagemagick/gimp/blender)' },
           },
           required: ['backends'],
         },
@@ -125,14 +148,32 @@ export function buildSynthMediaTools(jobs: JobManager): Array<{
             const flag = b['online'] ? 'online' : 'offline/local';
             const verified = b['protocolVerified'] === true ? 'protocol-verified' : 'protocol-UNVERIFIED';
             const submit = b['realSubmitAllowed'] === false ? ' real-submit:BLOCKED' : '';
+            const prio = typeof b['priority'] === 'number' ? ` #${b['priority']}` : '';
+            const dflt = b['effectiveDefault'] === true ? ' default:*' : '';
+            const eco = typeof b['ecosystem'] === 'string' ? ` eco:${b['ecosystem']}${b['supported'] === false ? '(unsupported)' : ''}` : '';
             const protocol = typeof b['protocol'] === 'string' ? ` ${b['protocol']}` : '';
-            return `- ${b['id']}${protocol}: ${models} [${mods}] ${flag} ${verified}${submit}`;
+            return `- ${b['id']}${protocol}: ${models} [${mods}] ${flag} ${verified}${submit}${prio}${dflt}${eco}`;
           });
+          const tools = (value as { tools?: Array<Record<string, unknown>> }).tools;
+          if (Array.isArray(tools) && tools.length > 0) {
+            lines.push('tools: ' + tools.map((t) => `${t['name']}${t['installed'] ? '✓' : '✗'}${t['enabled'] ? '' : '(disabled)'}`).join(' '));
+          }
           return [{ type: 'text', text: lines.length > 0 ? lines.join('\n') : 'no backends configured' }];
         },
       },
       async execute() {
-        return { backends: jobs.listBackends() };
+        const enriched = jobs.listBackends().map((b) => {
+          const prio = extras?.priority?.[b.id];
+          const gate = extras?.ecosystem?.[b.id];
+          return {
+            ...b,
+            ...(prio !== undefined ? { priority: prio } : {}),
+            ...(extras?.effectiveDefault?.has(b.id) ? { effectiveDefault: true } : {}),
+            ...(gate ? { ecosystem: gate.ecosystem, supported: gate.supported, ...(gate.reason ? { ecosystemReason: gate.reason } : {}) } : {}),
+          };
+        });
+        const tools = extras?.tools ? await extras.tools() : undefined;
+        return { backends: enriched, ...(tools ? { tools } : {}) };
       },
     },
     {

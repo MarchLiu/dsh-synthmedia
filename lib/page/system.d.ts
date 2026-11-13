@@ -12,8 +12,12 @@
  *    (operator knowledge of the H3 local deployment), not a published spec.
  *  - 48 GiB "勉强" floor: ESTIMATE (~2/3 of the full need; quantized cache
  *    offload assumed), explicitly an approximation.
- *  - 45 GiB model files on disk / 80 GiB comfortable: ESTIMATE for a 4-bit
- *    weight bundle plus runtime overhead.
+ *  - 40 GiB model files on disk / 480 GiB comfortable: MEASURED sizes
+ *    (2026-11-13, HF/ModelScope file listings). 33 GiB is the smallest
+ *    documented usable set (unsloth GGUF Q4: DiT 10.6 + text encoder 17.0 +
+ *    two VAEs 5.4), so 40 GiB is the "can you run it at all" floor; the
+ *    official BF16 trees are 133.8 GiB (FL2VA) and 464.2 GiB (whole repo),
+ *    so 480 GiB means "full repo without thinking about it".
  *  - 8 CPU cores comfortable floor: ESTIMATE for a sidecar serving one stream.
  * @module
  */
@@ -35,9 +39,9 @@ export interface H3Thresholds {
     readonly memFullBytes: number;
     /** Memory floor below which the verdict is 不足 (ESTIMATE). */
     readonly memMinBytes: number;
-    /** Disk the model files need (ESTIMATE). */
+    /** Disk the smallest usable checkpoint tree needs (measured FL2VA + margin). */
     readonly diskNeededBytes: number;
-    /** Disk for a comfortable verdict (ESTIMATE). */
+    /** Disk for the whole repo without thinking about it (measured + margin). */
     readonly diskComfortBytes: number;
     /** CPU core count for a comfortable verdict (ESTIMATE). */
     readonly coresComfort: number;

@@ -13,6 +13,9 @@ import { resolveConfig } from '../config.js';
 import { parseCustomProfiles, mergeCustomBackends } from './custom.js';
 import { readDshProviders, type DshProviderEntry } from './providers.js';
 import { collectSystemReport, assessH3, DEFAULT_H3_THRESHOLDS, type SystemReport, type H3Assessment } from './system.js';
+import { parseOrder, parseEnabledResources, parseEnabledTools, orderProfiles, resolveDefaultProfile, type ToolName } from './priority.js';
+import { gateBackends, type EcosystemGate } from './ecosystems.js';
+import { detectToolchain, type ToolStatus } from './toolchain.js';
 import {
   DownloadManager,
   defaultManifest,
@@ -41,6 +44,14 @@ export interface ProfileView {
   readonly liveVerified: boolean;
   readonly blockRealSubmit: boolean;
   readonly source: 'preset' | 'custom' | 'custom-override';
+  /** 1-based position in providerOrder (phase one; absent = unranked). */
+  readonly priority?: number;
+  /** True when this profile is the effective default for one of its modalities. */
+  readonly effectiveDefault?: boolean;
+  /** Ecosystem gate (phase one): h3 | seedance | other + supported flag. */
+  readonly ecosystem?: string;
+  readonly supported?: boolean;
+  readonly ecosystemReason?: string;
 }
 
 export interface PageSnapshot {
@@ -51,6 +62,14 @@ export interface PageSnapshot {
   readonly downloadManifest: { readonly downloadsDir: string; readonly entries: readonly unknown[] };
   readonly customProfilesError?: string;
   readonly dataDir: string;
+  /** Phase-one additions (back-compat: extra fields only). */
+  readonly order: readonly string[];
+  readonly enabledDshResources: readonly string[];
+  readonly enabledTools: readonly string[];
+  readonly ecosystems: Readonly<Record<string, EcosystemGate>>;
+  readonly tools?: readonly ToolStatus[];
+  /** Parse warnings from the new JSON-array config fields (never thrown). */
+  readonly configWarnings?: readonly string[];
 }
 
 /** Base backends map with the built-in defaults resolved. */
@@ -96,11 +115,37 @@ function profileView(b: BackendConfig, customIds: ReadonlySet<string>): ProfileV
 export function buildSnapshot(
   config: Record<string, unknown>,
   options: PageOptions,
-  extras: { readonly providers?: readonly DshProviderEntry[]; readonly providersError?: string; readonly downloads?: readonly DownloadProgress[]; readonly downloadManifest?: { downloadsDir: string; entries: readonly unknown[] } } = {},
+  extras: { readonly providers?: readonly DshProviderEntry[]; readonly providersError?: string; readonly downloads?: readonly DownloadProgress[]; readonly downloadManifest?: { downloadsDir: string; entries: readonly unknown[] }; readonly tools?: readonly ToolStatus[] } = {},
 ): PageSnapshot {
   const { config: resolved, customError } = effectiveConfig(config);
   const customIds = new Set(parseCustomProfiles(config['customProfiles']).profiles.map((p) => p.id));
-  const profiles = Object.values(resolved.backends).map((b) => profileView(b, customIds));
+  const { order, warnings: orderWarn } = parseOrder(config['providerOrder']);
+  const { resources, warnings: resWarn } = parseEnabledResources(config['enabledDshResources']);
+  const { tools: enabledTools, warnings: toolWarn } = parseEnabledTools(config['enabledTools']);
+  const warnings = [...orderWarn, ...resWarn, ...toolWarn];
+  const gates = gateBackends(resolved.backends);
+  const backendList = Object.values(resolved.backends);
+  const defaults = new Set<string>();
+  const modalities = new Set<string>();
+  for (const b of backendList) for (const m of b.modalities) modalities.add(m);
+  for (const m of modalities) {
+    const d = resolveDefaultProfile(backendList, m, order, (p) => gates[p.id]?.supported === true);
+    if (d) defaults.add(d.id);
+  }
+  const priorityOf = (id: string): number | undefined => {
+    const i = order.indexOf(id);
+    return i >= 0 ? i + 1 : undefined;
+  };
+  const profiles = orderProfiles(backendList, order).map((b) => {
+    const gate = gates[b.id];
+    const prio = priorityOf(b.id);
+    return {
+      ...profileView(b, customIds),
+      ...(prio !== undefined ? { priority: prio } : {}),
+      ...(defaults.has(b.id) ? { effectiveDefault: true } : {}),
+      ...(gate ? { ecosystem: gate.ecosystem, supported: gate.supported, ...(gate.reason ? { ecosystemReason: gate.reason } : {}) } : {}),
+    };
+  });
   return {
     profiles,
     providers: extras.providers ?? [],
@@ -108,7 +153,13 @@ export function buildSnapshot(
     downloads: extras.downloads ?? [],
     downloadManifest: extras.downloadManifest ?? { downloadsDir: join(options.dataDir, 'downloads'), entries: [] },
     ...(customError ? { customProfilesError: customError } : {}),
+    ...(warnings.length > 0 ? { configWarnings: warnings } : {}),
     dataDir: options.dataDir,
+    order,
+    enabledDshResources: resources,
+    enabledTools,
+    ecosystems: gates,
+    ...(extras.tools ? { tools: extras.tools } : {}),
   };
 }
 
@@ -134,6 +185,10 @@ export interface PageServices {
   readonly resolveCredential?: (name: string) => Promise<string | undefined>;
   /** Optional DNS resolver for the fetch-models SSRF guard (tests inject it). */
   readonly lookup?: HostLookup;
+  /** Optional toolchain probe (tests inject a scripted one; no process spawn). */
+  readonly detectTools?: (enabled: readonly ToolName[]) => Promise<readonly ToolStatus[]>;
+  /** Optional system-report collector (tests inject a stub; defaults to real probes). */
+  readonly collectReport?: (dir: string) => Promise<SystemReport>;
 }
 
 export function createPageServices(
@@ -157,7 +212,8 @@ export async function pageDetect(services: PageServices): Promise<{ report: Syst
   // statfs needs an existing path: probe the data dir (downloads live below
   // it and share the same volume, so free-disk is identical).
   const targetDir = services.options.dataDir;
-  const report = await collectSystemReport(targetDir);
+  const collect = services.collectReport ?? collectSystemReport;
+  const report = await collect(targetDir);
   return { report, assessment: assessH3(report, DEFAULT_H3_THRESHOLDS) };
 }
 
@@ -206,6 +262,9 @@ export async function runPageCommand(
   }
   if (arg === 'json') {
     const providersData = loadProviders(services.options.providersPatchPath);
+    const { tools: enabledTools } = parseEnabledTools(services.config['enabledTools']);
+    const probe = services.detectTools ?? detectToolchain;
+    const tools = await probe(enabledTools);
     const snapshot = buildSnapshot(services.config, services.options, {
       providers: providersData.providers,
       ...(providersData.error ? { providersError: providersData.error } : {}),
@@ -214,6 +273,7 @@ export async function runPageCommand(
         downloadsDir: services.manager.manifestNow().downloadsDir,
         entries: services.manager.manifestNow().entries,
       },
+      tools,
     });
     return { kind: 'success', text: 'synthmedia 配置页快照已生成', json: snapshot };
   }
@@ -228,6 +288,18 @@ export async function runPageCommand(
   if (arg === 'detect') {
     try {
       const { report, assessment } = await pageDetect(services);
+      // Toolchain + ecosystem summary: `/synthmedia detect` is the operator's
+      // one-stop check before wiring an offline H3 service (enabled tools are
+      // probed, disabled ones are not spawned; unknown config degrades).
+      const { tools: enabledTools } = parseEnabledTools(services.config['enabledTools']);
+      const probe = services.detectTools ?? detectToolchain;
+      const tools = await probe(enabledTools);
+      const { config: resolved } = effectiveConfig(services.config);
+      const ecosystems = gateBackends(resolved.backends);
+      const countEco = (id: string): number => Object.values(ecosystems).filter((g) => g.ecosystem === id).length;
+      const toolLine = tools.length === 0
+        ? '工具链：未启用（Config 页勾选 ffmpeg / imagemagick / gimp / blender 后显示探测结果）'
+        : `工具链：${tools.map((t) => `${t.name}${t.enabled ? (t.installed ? '✓' : '✗') : '(未启用)'}`).join(' ')}`;
       const lines = [
         `平台 ${report.platform}/${report.arch} · CPU ${report.cpuCount} 核 ${report.cpuModel ?? ''}`,
         report.totalMemBytes !== undefined ? `内存 ${fmtBytes(report.totalMemBytes)}` : '内存未知',
@@ -237,11 +309,14 @@ export async function runPageCommand(
         '',
         `离线 H3 可行性：${assessment.overall}`,
         ...assessment.dimensions.map((d) => `- ${d.dimension}：${d.value} → ${d.verdict}（${d.basis}）`),
+        '',
+        toolLine,
+        `生态门禁：h3 ${countEco('h3')} · seedance ${countEco('seedance')} · other ${countEco('other')}（other 不参与默认路由，仍可显式调用）`,
       ];
       return {
         kind: 'success',
         text: lines.join('\n'),
-        json: { report, assessment },
+        json: { report, assessment, tools, ecosystems },
       };
     } catch (err) {
       return { kind: 'error', text: `检测失败：${err instanceof Error ? err.message : String(err)}` };

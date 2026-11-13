@@ -1,6 +1,9 @@
 import type { SynthMediaConfig } from '../config.js';
 import { type DshProviderEntry } from './providers.js';
 import { type SystemReport, type H3Assessment } from './system.js';
+import { type ToolName } from './priority.js';
+import { type EcosystemGate } from './ecosystems.js';
+import { type ToolStatus } from './toolchain.js';
 import { DownloadManager, readOptionalText, type DownloadProgress } from './downloads.js';
 import { type HostLookup } from './fetch-models.js';
 /** Page-scoped knobs (subset of the plugin Config schema). */
@@ -21,6 +24,14 @@ export interface ProfileView {
     readonly liveVerified: boolean;
     readonly blockRealSubmit: boolean;
     readonly source: 'preset' | 'custom' | 'custom-override';
+    /** 1-based position in providerOrder (phase one; absent = unranked). */
+    readonly priority?: number;
+    /** True when this profile is the effective default for one of its modalities. */
+    readonly effectiveDefault?: boolean;
+    /** Ecosystem gate (phase one): h3 | seedance | other + supported flag. */
+    readonly ecosystem?: string;
+    readonly supported?: boolean;
+    readonly ecosystemReason?: string;
 }
 export interface PageSnapshot {
     readonly profiles: readonly ProfileView[];
@@ -33,6 +44,14 @@ export interface PageSnapshot {
     };
     readonly customProfilesError?: string;
     readonly dataDir: string;
+    /** Phase-one additions (back-compat: extra fields only). */
+    readonly order: readonly string[];
+    readonly enabledDshResources: readonly string[];
+    readonly enabledTools: readonly string[];
+    readonly ecosystems: Readonly<Record<string, EcosystemGate>>;
+    readonly tools?: readonly ToolStatus[];
+    /** Parse warnings from the new JSON-array config fields (never thrown). */
+    readonly configWarnings?: readonly string[];
 }
 /**
  * Effective configuration = built-in presets + config backends overrides +
@@ -51,6 +70,7 @@ export declare function buildSnapshot(config: Record<string, unknown>, options: 
         downloadsDir: string;
         entries: readonly unknown[];
     };
+    readonly tools?: readonly ToolStatus[];
 }): PageSnapshot;
 /** Read providers from the configured patch path (safe: read-only, one file). */
 export declare function loadProviders(patchPath?: string): {
@@ -67,6 +87,10 @@ export interface PageServices {
     readonly resolveCredential?: (name: string) => Promise<string | undefined>;
     /** Optional DNS resolver for the fetch-models SSRF guard (tests inject it). */
     readonly lookup?: HostLookup;
+    /** Optional toolchain probe (tests inject a scripted one; no process spawn). */
+    readonly detectTools?: (enabled: readonly ToolName[]) => Promise<readonly ToolStatus[]>;
+    /** Optional system-report collector (tests inject a stub; defaults to real probes). */
+    readonly collectReport?: (dir: string) => Promise<SystemReport>;
 }
 export declare function createPageServices(config: Record<string, unknown>, options: PageOptions, hostJobs?: unknown, resolveCredential?: (name: string) => Promise<string | undefined>): PageServices;
 export declare function pageDetect(services: PageServices): Promise<{
