@@ -180,12 +180,17 @@ async function tempDataDir() {
   return mkdtemp(join(tmpdir(), 'synth-page-'));
 }
 
-test('page/downloads: manifest defaults are placeholders; schema drops malformed entries', async () => {
+test('page/downloads: manifest defaults carry official H3 urls; schema drops malformed entries', async () => {
   const { defaultManifest, validateManifest } = await importPage('downloads');
   const dir = await tempDataDir();
   const m = defaultManifest(join(dir, 'downloads'));
-  assert.equal(m.entries.length, 1);
-  assert.equal(m.entries[0].url, '', 'shipped manifest must carry NO fabricated url');
+  assert.ok(m.entries.length >= 1);
+  const base = 'https://huggingface.co/MiniMaxAI/MiniMax-H3/resolve/main/';
+  for (const e of m.entries) {
+    assert.match(e.url, new RegExp(`^${base.replace(/\./g, '\\.')}`), 'shipped urls must point at the official HF repo');
+    assert.match(e.id, /^[a-z0-9][a-z0-9._-]*$/, 'shipped ids must pass schema validation');
+  }
+  assert.ok(m.entries.some((e) => e.url.endsWith('transformer/diffusion_pytorch_model-00001-of-00014.safetensors')));
   const v = validateManifest({
     downloadsDir: '',
     entries: [

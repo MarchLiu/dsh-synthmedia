@@ -748,7 +748,7 @@ window.__ModuleLoader__.load({
 				jsx.jsxs('div', { style: styles.section, children: [
 					jsx.jsx('div', { style: styles.title, children: t('view.dl') }),
 					manifestEntries.length === 0
-						? jsx.jsx('div', { style: styles.muted, children: '下载清单为空（配置 dataDir 后自动生成占位清单）。' })
+						? jsx.jsx('div', { style: styles.muted, children: '下载清单为空（配置 dataDir 后自动生成默认 H3 清单）。' })
 						: jsx.jsx('div', { style: { display: 'flex', flexDirection: 'column', gap: 4 }, children: manifestEntries.map((e) => {
 							const prog = downloads.find((d) => d.id === e.id);
 							const st = prog && prog.status !== undefined ? prog : { id: e.id, name: e.name, status: 'idle' };

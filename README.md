@@ -401,9 +401,28 @@ Probes: `os.cpus/totalmem/arch/platform`、目标目录 `fs.statfs`、darwin
 
 ### 离线模型下载
 
-- 清单：`<dataDir>/downloads.json`（用户可编辑）。首次启动自动写入默认占位
-  条目 `minimax-h3-4bit`，**URL 为空**——插件绝不编造下载源；使用者填入自己
-  确认过的 http(s) URL 后才开始，UI 对空 URL 条目显示「URL 待填」。
+- 清单：`<dataDir>/downloads.json`（用户可编辑）。首次启动自动写入默认清单：
+  MiniMax H3 全套官方文件的逐文件条目（默认变体 **H3-Base**，即 HF 仓库根
+  pipeline；H3-Context-IR / H3-Regenerate-2K 是**同权重的推理期变体**，按官方
+  `scripts/readme/*.sh` 配方运行即可，无需另行下载权重）。
+- 官方下载源（2026-08-03 开源）：
+  - Hugging Face（默认源）：https://huggingface.co/MiniMaxAI/MiniMax-H3
+    （文件 URL 形如 `.../resolve/main/transformer/diffusion_pytorch_model-00001-of-00014.safetensors`）
+  - ModelScope 镜像（备选，改写 `url` 前缀即可）：
+    https://modelscope.cn/models/MiniMax/MiniMax-H3 （文件 URL 形如 `.../resolve/master/<path>`）
+  - 本地部署指南：https://platform.minimax.io/docs/guides/local-deploy-h3 ；仓库：https://github.com/MiniMax-AI/MiniMax-H3
+- 文件集：根 pipeline 全部文件（transformer 14 分片 + transformer_ref 14 分片
+  （reference 子管线）+ text_encoder 14 分片 + vae 3 分片 + audio_vae +
+  tokenizer/processor 配置 + model_index 等，约 77 个文件，BF16 Safetensors，
+  约 33.1B 参数/仓库总占用 ≈ 355 GiB 含 FL2VA/Ref2VA 子目录副本）。默认清单
+  **不含** FL2VA/Ref2VA 子目录（与根管线组件重复），需要时自行在
+  downloads.json 补条目。
+- 运行时要求：vLLM-Omni / SGLang / diffusers（见上文「Offline H3 runtime
+  support matrix」）；4-bit GGUF 走 `unsloth/MiniMax-H3-GGUF`，不在本清单内。
+- 目标目录：`<dataDir>/downloads/`（默认 `synthmedia-data/downloads/`，可在
+  设置表单改 `dataDir`）。注意：每个条目下载为平铺的 `<id>.bin` 文件，文件名
+  不保留仓库子目录结构；如需完整 diffusers 目录布局，建议直接用
+  `huggingface-cli download MiniMaxAI/MiniMax-H3`，本清单适合单文件补拉。
 - 目标目录：`<dataDir>/downloads/`（默认 `synthmedia-data/downloads/`，可在
   设置表单改 `dataDir`）。
 - 断点续传：字节先落 `<id>.bin.part`；重启任务时若存在合法 .part 则发

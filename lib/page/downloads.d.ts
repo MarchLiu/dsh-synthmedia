@@ -3,10 +3,10 @@
  *
  * Design (documented in README「离线模型下载」):
  *  - The download LIST lives in a user-editable manifest at
- *    `<dataDir>/downloads.json`. The shipped default contains PLACEHOLDER
- *    entries with EMPTY urls — the plugin never fabricates a download source
- *    and refuses to start any entry whose url is not a plain http(s) URL the
- *    operator filled in.
+ *    `<dataDir>/downloads.json`. The shipped default lists the real, official
+ *    MiniMax H3 files on Hugging Face (MiniMaxAI/MiniMax-H3) — every url is a
+ *    plain https resolve URL the operator can swap (e.g. for the ModelScope
+ *    mirror) before starting.
  *  - Each download is one background task: in-memory record + registration
  *    with the host Jobs registry (kind `synthmedia-download`) so progress and
  *    cancel also appear in the host Jobs UI — the same structural contract
@@ -53,7 +53,7 @@ export interface DownloadManifest {
     readonly entries: readonly DownloadEntry[];
     readonly downloadsDir: string;
 }
-/** Shipped placeholder manifest content (operator edits urls before use). */
+/** Shipped default manifest: real official H3 urls (operator-editable). */
 export declare function defaultManifest(downloadsDir: string): DownloadManifest;
 /** Schema-validate a manifest read from disk; any malformed entry is dropped. */
 export declare function validateManifest(raw: unknown, downloadsDir: string): DownloadManifest;
