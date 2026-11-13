@@ -143,7 +143,7 @@ export interface HostAddress {
 export type HostLookup = (hostname: string) => Promise<readonly HostAddress[]>;
 
 /** Production resolver: every A/AAAA record, not just the first one. */
-const systemLookup: HostLookup = async (hostname) => dnsLookup(hostname, { all: true, verbatim: true });
+export const systemLookup: HostLookup = async (hostname) => dnsLookup(hostname, { all: true, verbatim: true });
 
 /** True for a URL host that is already an IP literal (no DNS involved). */
 function isIpLiteral(host: string): boolean {
@@ -160,7 +160,7 @@ type Resolution =
  * single-record rebinding tricks; an unresolvable or empty answer set is also
  * refused (a request to it could only fail, so fail closed before dispatch).
  */
-async function resolvePublicHost(host: string, lookup: HostLookup, phase: string): Promise<Resolution> {
+export async function resolvePublicHost(host: string, lookup: HostLookup, phase: string): Promise<Resolution> {
   if (isIpLiteral(host)) return { ok: true, addresses: [host] };
   let answers: readonly HostAddress[];
   try {

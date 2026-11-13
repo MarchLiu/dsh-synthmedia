@@ -140,3 +140,114 @@ test('httpByteSource: gives up after more than 5 redirects', async () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// DNS-level SSRF guard on redirect targets (resolvePublicHost reuse). A mock
+// resolver stands in for DNS so tests never do real lookups; the public-
+// hostname → private-address cases are exactly the 127.0.0.1.nip.io style
+// rebinding the literal-only guard missed.
+// ---------------------------------------------------------------------------
+
+function mockLookup(map) {
+  const calls = [];
+  const fn = async (hostname) => {
+    calls.push(hostname);
+    const answers = map[hostname];
+    if (!answers) throw new Error(`mock DNS: no record for ${hostname}`);
+    return answers;
+  };
+  fn.calls = calls;
+  return fn;
+}
+
+test('httpByteSource: refuses a redirect to a hostname resolving to 127.0.0.1 (DNS rebinding SSRF)', async () => {
+  const { createHttpByteSource } = await import('../lib/page/downloads.js');
+  const lookup = mockLookup({ 'evil.example.test': [{ address: '127.0.0.1', family: 4 }] });
+  const src = createHttpByteSource({ lookup }); // strict guard, no allowRedirectHost
+  await withServer((req, resp) => {
+    resp.writeHead(302, { Location: `http://evil.example.test:${serverPortFor(req)}/private` });
+    resp.end();
+  }).then(async ({ base, close }) => {
+    try {
+      await assert.rejects(() => src.respond(`${base}/start`), /SSRF|私有|private/);
+      assert.ok(lookup.calls.includes('evil.example.test'), 'the redirect hostname must be resolved for the check');
+    } finally {
+      await close();
+    }
+  });
+});
+
+function serverPortFor(req) {
+  return req.socket.localPort;
+}
+
+test('httpByteSource: refuses redirect hostnames resolving to other private / link-local ranges', async () => {
+  const { createHttpByteSource } = await import('../lib/page/downloads.js');
+  const cases = [
+    ['rfc1918.example.test', [{ address: '10.1.2.3', family: 4 }]],
+    ['cgnat.example.test', [{ address: '100.100.1.2', family: 4 }]],
+    ['linklocal.example.test', [{ address: '169.254.169.254', family: 4 }]],
+    ['ula.example.test', [{ address: 'fd00::1', family: 6 }]],
+    ['mapped.example.test', [{ address: '::ffff:192.168.0.9', family: 6 }]],
+  ];
+  for (const [hostname, answers] of cases) {
+    const lookup = mockLookup({ [hostname]: answers });
+    const src = createHttpByteSource({ lookup });
+    await withServer((req, resp) => {
+      resp.writeHead(302, { Location: `http://${hostname}:${req.socket.localPort}/x` });
+      resp.end();
+    }).then(async ({ base, close }) => {
+      try {
+        await assert.rejects(() => src.respond(`${base}/start`), /SSRF|私有|private/, `${hostname} must be refused`);
+      } finally {
+        await close();
+      }
+    });
+  }
+});
+
+test('httpByteSource: refuses a multi-address answer when ANY record is private', async () => {
+  const { createHttpByteSource } = await import('../lib/page/downloads.js');
+  const lookup = mockLookup({
+    'mixed.example.test': [
+      { address: '93.184.216.34', family: 4 },
+      { address: '192.168.5.5', family: 4 },
+    ],
+  });
+  const src = createHttpByteSource({ lookup });
+  await withServer((req, resp) => {
+    resp.writeHead(302, { Location: `http://mixed.example.test:${req.socket.localPort}/x` });
+    resp.end();
+  }).then(async ({ base, close }) => {
+    try {
+      await assert.rejects(() => src.respond(`${base}/start`), /SSRF|私有|private/);
+    } finally {
+      await close();
+    }
+  });
+});
+
+test('httpByteSource: rebinding after the pre-check — the connection still re-verifies (TOCTOU)', async () => {
+  const { createHttpByteSource } = await import('../lib/page/downloads.js');
+  let call = 0;
+  const lookup = async (hostname) => {
+    call += 1;
+    if (call === 1) return [{ address: '93.184.216.34', family: 4 }]; // pre-check sees public
+    return [{ address: '127.0.0.1', family: 4 }]; // rebinding before connect
+  };
+  const src = createHttpByteSource({ lookup });
+  let serverHits = 0;
+  await withServer((req, resp) => {
+    serverHits += 1;
+    resp.writeHead(302, { Location: `http://rebind.example.test:${req.socket.localPort}/private` });
+    resp.end();
+  }).then(async ({ base, close }) => {
+    try {
+      await assert.rejects(() => src.respond(`${base}/start`), /SSRF|私有|private|DNS/);
+      assert.equal(call, 2, 'guard resolved once for the pre-check, controlled lookup resolved once more');
+      assert.equal(serverHits, 1, 'the rebinding second resolution must never produce a second connection');
+    } finally {
+      await close();
+    }
+  });
+});
