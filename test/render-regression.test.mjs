@@ -203,7 +203,16 @@ test('defect 2: directMutate write path is reachable without a ConfigForm', asyn
   fill('modalitiesInput', 'video');
   const submit = findByType(tree, 'button', (b) => textOf(b) === 'custom.add').at(-1);
   submit.props.onClick();
+  assert.equal(calls.length, 0, 'phase-two write model: editor submit only writes the DRAFT, nothing is sent yet');
+  // Unified「保存并生效」button commits the dirty fields as one batch.
+  runtime.reuse();
+  tree = card({ view: 'page', form: undefined, directMutate, t: T });
+  const saveBtn = findByType(tree, 'button', (b) => textOf(b) === 'settings.save')[0];
+  assert.ok(saveBtn, 'save button present');
+  assert.notEqual(saveBtn.props.disabled, true, 'save enabled without a ConfigForm when directMutate exists');
+  saveBtn.props.onClick();
   assert.equal(calls.length, 1, 'directMutate called once');
+  assert.equal(calls[0].length, 1, 'only the dirty field is committed');
   assert.deepEqual(calls[0][0].path, ['customProfiles']);
   const written = JSON.parse(calls[0][0].value);
   assert.equal(written[0].id, 'my-profile');

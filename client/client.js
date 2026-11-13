@@ -5,6 +5,30 @@
 // command transport for live data (real profile set, system detection,
 // download progress).
 //
+// Settings-card information architecture (phase two, single card, one column,
+// fixed section order):
+//   ① Overview    — read-only status strip + parse warnings (no actions);
+//   ② Sources     — a) DSH subscription resources (checkboxes →
+//                    enabledDshResources "providerId::modelId" +「应用勾选」
+//                    generating custom-profile drafts), b) self-built media
+//                    providers (id/protocol/baseURL/authEnv/models/modalities/
+//                    online → customProfiles, edit/delete/test);
+//   ③ Priority    — one global ordered list (up/down/top → providerOrder);
+//                   display order + per-modality DEFAULT only, never an
+//                   automatic fallback;
+//   ④ Ecosystems  — h3 + seedance cards, everything else collapsed under
+//                   「未支持（仍可显式调用）」; display only;
+//   ⑤ Toolchain   — ffmpeg/imagemagick/gimp/blender checkboxes → enabledTools,
+//                   probe status + one-line install hint;
+//   ⑥ Advanced    — outputDir/dataDir/providersPatchPath/defaultTimeoutMs,
+//                   collapsed.
+// Consistency: one Section component (title + one-line desc + optional
+// action + content), one Row component (name + mono meta + status badge +
+// right-aligned actions), and ONE write model: local draft overrides → a
+// single「保存并生效」button commits ONLY the dirty fields as one mutate
+// batch (host ConfigForm first, the plugin's own remote.settings.mutate —
+// directMutate — as the independent fallback when no ConfigForm exists).
+//
 // Hand-written ModuleLoader wrapper, same format the host bundler emits and
 // the same convention dsh-cybernetics ships (its lib/client.js is also
 // hand-written). The registration id MUST equal the package manifest name:
@@ -30,41 +54,85 @@ window.__ModuleLoader__.load({
 		const NS = 'synthmedia';
 		const zh = {
 			'settings.title': 'SynthMedia 媒体生成',
-			'settings.description': 'ProviderProfile 一览、DSH providers 导入、自定义 Profile 与离线模型。凭据只保存环境变量名，永不保存密钥值。保存配置后插件自动重载生效。',
+			'settings.description': '六节式配置页：概览 / 资源来源 / 优先级 / 生态 / 工具链 / 高级。修改先入草稿，由「保存并生效」一次性提交；凭据只保存环境变量名，永不保存密钥值。',
 			'settings.cardLabel': 'SynthMedia 配置',
 			'settings.summaryReady': '{n} 个 ProviderProfile 生效中',
 			'settings.unavailable': '设置通道不可用（宿主未提供该插件的 ConfigForm）。重启宿主后重试。',
 			'settings.saving': '保存中…',
 			'settings.saveFailed': '保存失败，请重试。',
-			'section.profiles': '生效中的 ProviderProfile',
-			'section.profilesDesc': '内置 preset 与用户自定义 Profile。verified 徽标：协议=文档形状已核验；实测=对该部署发起过真实调用。',
-			'section.import': '从 DSH providers 导入',
-			'section.importDesc': '勾选要暴露给 SynthMedia 的 provider/模型。仅火山 Seedance 生态与 MiniMax H3 生态受支持，其余置灰「暂不支持」。凭据环境变量名可修改后应用。',
-			'section.custom': '自定义 Provider / 模型',
-			'section.customDesc': '新建 SynthMedia 特有 Profile（id、协议、baseURL、凭据环境变量名、模型 id）。支持编辑与删除。',
+			'settings.saved': '已保存并生效。',
+			'settings.save': '保存并生效',
+			'settings.saveDirty': '有 {n} 项未保存的修改，离开页面前请保存。',
+			'section.overview': '概览',
+			'section.overviewDesc': '当前生效配置一览（纯状态，无操作）。',
+			'section.sources': '资源来源',
+			'section.sourcesDesc': 'DSH 订阅账户资源勾选与自建影像 Provider 管理；修改先入草稿，统一由「保存并生效」提交。',
+			'section.priority': '优先级',
+			'section.priorityDesc': '生成时仍需显式指定 backend；此顺序只决定各模态「默认」profile 与展示顺序，不会自动 fallback。靠前优先。',
+			'section.ecosystems': '生态',
+			'section.ecosystemsDesc': '当前先支持 H3 与 Seedance 两个生态；其余生态不参与默认路由，仍可通过显式 backend id 调用。',
+			'section.toolchain': '工具链',
+			'section.toolchainDesc': '勾选后插件才探测并使用对应本地工具；未勾选的不探测（与后端一致）。',
+			'section.advanced': '高级',
+			'section.advancedDesc': '目录、补丁路径与超时；改动保存后随插件重载生效。',
+			'overview.profiles': '生效 Profile',
+			'overview.defaults': '各模态默认',
+			'overview.noDefault': '（无）',
+			'overview.h3': '离线 H3 判定',
+			'overview.h3Unknown': '未检测（到会话「媒体服务」页运行检测获取）',
+			'overview.toolsReady': '工具链就绪',
+			'overview.warnings': '解析告警',
+			'sources.dsh': 'DSH 订阅账户',
+			'sources.dshDesc': '勾选要暴露给 SynthMedia 的媒体资源（写入 enabledDshResources，元素形如 "providerId::modelId"）。仅 H3 / Seedance 生态可勾选，其余整行置灰「暂不支持」；勾选后点「应用勾选」生成自定义 Profile 草稿。',
+			'sources.custom': '自建 Provider（影像专用）',
+			'sources.customDesc': '新建 SynthMedia 专用 Profile（id、协议、baseURL、凭据环境变量名、模型 id、模态、在线开关）；写入 customProfiles。凭据只保存环境变量名。',
 			'badge.protocol': '协议✓', 'badge.noProtocol': '协议✗', 'badge.live': '实测✓', 'badge.noLive': '实测✗',
 			'badge.blocked': '已封锁', 'badge.offline': '离线', 'badge.online': '在线',
-			'import.apply': '应用勾选（写入自定义 Profile）',
+			'badge.supported': '支持', 'badge.unsupported': '暂不支持', 'badge.default': '默认', 'badge.custom': 'custom',
+			'import.apply': '应用勾选（生成 Profile 草稿）',
 			'import.authEnv': '凭据环境变量名',
 			'import.none': '（构建时未发现 DSH providers 数据；可在会话「媒体服务」页用 /synthmedia providers 查看实时清单）',
 			'import.unsupported': '暂不支持',
 			'import.manualHint': 'DSH providers 只声明 LLM 聊天模型；打开配置页时会尝试 GET {baseURL}/v1/models 动态拉取真实模型清单（可选 Bearer token，仅内存），拉取失败回退为按 baseURL 匹配内置 preset 推荐媒体模型，也可手动补充模型 id。',
 			'import.manualPlaceholder': '手动补充模型 id',
 			'import.manualAdd': '补充',
-			'import.applied': '已写入 {n} 个自定义 Profile，保存后生效。',
+			'import.appliedDraft': '已生成 {n} 个自定义 Profile 草稿，点「保存并生效」后提交。',
 			'import.tokenLabel': 'Bearer token（可选，仅本次内存使用，不保存）',
 			'import.tokenPlaceholder': '留空 = 匿名拉取',
 			'import.fetch': '拉取模型', 'import.fetching': '拉取中…',
 			'import.fetchOk': '已拉取 {n} 个模型',
 			'import.fetchFailed': '动态拉取失败（网络/CORS/鉴权），已回退为内置 preset 建议。',
-			'import.unsupportedHeader': '暂不支持（远程清单中的非媒体模型）',
+			'import.unsupportedHeader': '暂不支持（非媒体 LLM / 未支持生态，均不可勾选）',
+			'priority.top': '置顶', 'priority.up': '上移', 'priority.down': '下移',
+			'priority.default': '默认',
+			'priority.rank': '优先级第 {n} 位',
+			'priority.empty': '暂无 Profile。',
+			'eco.h3': 'MiniMax H3', 'eco.seedance': '火山 Seedance',
+			'eco.families.h3': '模型家族：minimax-h3（video）',
+			'eco.families.seedance': '模型家族：doubao-seedance（video）/ doubao-seedream（image）/ seed-tts（audio）',
+			'eco.profiles': '当前 Profile 数',
+			'eco.defaultHit': '默认命中：是',
+			'eco.defaultMiss': '默认命中：否',
+			'eco.unsupportedHeader': '未支持（仍可显式调用）',
+			'tool.installed': '已装', 'tool.missing': '未装',
+			'tool.notProbed': '未勾选（不探测）',
 			'custom.add': '添加', 'custom.update': '保存修改', 'custom.delete': '删除', 'custom.edit': '编辑',
+			'custom.confirmDelete': '确认删除？',
+			'custom.deleted': '{id} 已从草稿移除，点「保存并生效」后提交。',
+			'custom.savedDraft': '{id} 已写入草稿，点「保存并生效」后提交。',
+			'custom.test': '测试连接', 'custom.testing': '测试中…',
+			'custom.testOk': '可达 · {n} 个模型',
+			'custom.testFail': '不可达（网络/CORS/鉴权）',
 			'custom.field.id': 'Profile id', 'custom.field.protocol': '协议',
 			'custom.field.baseUrl': 'Base URL', 'custom.field.authEnv': '凭据环境变量名',
 			'custom.field.models': '模型 id（逗号分隔）', 'custom.field.modalities': '模态（逗号分隔 video/image/audio）',
 			'custom.field.online': '在线（可发起真实调用）',
 			'custom.invalid': '表单校验失败：{msg}',
 			'custom.empty': '暂无自定义 Profile。',
+			'advanced.outputDir': 'outputDir',
+			'advanced.dataDir': 'dataDir',
+			'advanced.providersPatchPath': 'providersPatchPath',
+			'advanced.defaultTimeoutMs': 'defaultTimeoutMs（毫秒）',
 			'corrupt': '存储的自定义配置有问题：{msg}',
 			'view.tab': '媒体服务',
 			'view.description': '实时 Profile 数据、系统资源检测与离线 H3 下载。',
@@ -79,41 +147,85 @@ window.__ModuleLoader__.load({
 		};
 		const en = {
 			'settings.title': 'SynthMedia media generation',
-			'settings.description': 'Provider profiles, DSH-provider import, custom profiles and offline model downloads. Credentials are stored as env-var NAMES only. Saving reloads the plugin.',
+			'settings.description': 'Six-section settings page: Overview / Sources / Priority / Ecosystems / Toolchain / Advanced. Edits stay in a local draft; one「Save & apply」button commits them. Credentials are stored as env-var NAMES only, never values.',
 			'settings.cardLabel': 'SynthMedia settings',
 			'settings.summaryReady': '{n} provider profile(s) effective',
 			'settings.unavailable': 'Settings transport unavailable (host does not serve this plugin ConfigForm yet). Restart the host and retry.',
 			'settings.saving': 'Saving…',
 			'settings.saveFailed': 'Save failed, please retry.',
-			'section.profiles': 'Effective ProviderProfiles',
-			'section.profilesDesc': 'Built-in presets and user-defined profiles. verified badges: protocol = documented shape verified; live = a real call succeeded against this deployment.',
-			'section.import': 'Import from DSH providers',
-			'section.importDesc': 'Pick provider/models to expose to SynthMedia. Only the Volcengine Seedance and MiniMax H3 ecosystems are supported; everything else is greyed out.',
-			'section.custom': 'Custom provider / models',
-			'section.customDesc': 'Create SynthMedia-specific profiles (id, protocol, baseURL, credential env-var name, model ids). Edit and delete supported.',
+			'settings.saved': 'Saved and applied.',
+			'settings.save': 'Save & apply',
+			'settings.saveDirty': '{n} unsaved change(s) — save before leaving this page.',
+			'section.overview': 'Overview',
+			'section.overviewDesc': 'Read-only snapshot of the effective configuration (status only, no actions).',
+			'section.sources': 'Sources',
+			'section.sourcesDesc': 'DSH subscription resources and self-built media providers; edits stay in the draft and are committed by「Save & apply」.',
+			'section.priority': 'Priority',
+			'section.priorityDesc': 'Generation still takes an explicit backend; this order only picks each modality\'s DEFAULT profile and the display order — never an automatic fallback. Earlier wins.',
+			'section.ecosystems': 'Ecosystems',
+			'section.ecosystemsDesc': 'Currently H3 and Seedance are supported; other ecosystems never become the default but remain callable via an explicit backend id.',
+			'section.toolchain': 'Toolchain',
+			'section.toolchainDesc': 'Only checked tools are probed and used by the plugin; unchecked ones are never probed (matches the backend).',
+			'section.advanced': 'Advanced',
+			'section.advancedDesc': 'Directories, patch path and timeout; saved changes take effect with the plugin reload.',
+			'overview.profiles': 'Effective profiles',
+			'overview.defaults': 'Default per modality',
+			'overview.noDefault': '(none)',
+			'overview.h3': 'Offline H3 verdict',
+			'overview.h3Unknown': 'Not detected (run detection on the「Media」session tab)',
+			'overview.toolsReady': 'Toolchain ready',
+			'overview.warnings': 'Parse warnings',
+			'sources.dsh': 'DSH subscription account',
+			'sources.dshDesc': 'Check media resources to expose to SynthMedia (writes enabledDshResources, entries shaped "providerId::modelId"). Only H3 / Seedance ecosystems are checkable; everything else is greyed out; then press「Apply selection」to generate custom-profile drafts.',
+			'sources.custom': 'Self-built provider (media only)',
+			'sources.customDesc': 'Create SynthMedia-specific profiles (id, protocol, baseURL, credential env-var name, model ids, modalities, online switch); writes customProfiles. Credentials are stored as env-var names only.',
 			'badge.protocol': 'proto✓', 'badge.noProtocol': 'proto✗', 'badge.live': 'live✓', 'badge.noLive': 'live✗',
 			'badge.blocked': 'blocked', 'badge.offline': 'offline', 'badge.online': 'online',
-			'import.apply': 'Apply selection (writes custom profiles)',
+			'badge.supported': 'supported', 'badge.unsupported': 'unsupported', 'badge.default': 'default', 'badge.custom': 'custom',
+			'import.apply': 'Apply selection (generates profile drafts)',
 			'import.authEnv': 'Credential env var name',
 			'import.none': '(No DSH-provider snapshot baked at build time; use /synthmedia providers in the session tab for live data)',
 			'import.unsupported': 'unsupported',
 			'import.manualHint': 'DSH providers declare LLM chat models only; opening the page tries GET {baseURL}/v1/models for the live model list (optional Bearer token, memory only). On failure it falls back to baseURL-matched built-in preset suggestions, and model ids can always be added manually.',
 			'import.manualPlaceholder': 'Add a model id manually',
 			'import.manualAdd': 'Add',
-			'import.applied': 'Wrote {n} custom profile(s). Takes effect after save.',
+			'import.appliedDraft': 'Generated {n} custom profile draft(s); press「Save & apply」to commit.',
 			'import.tokenLabel': 'Bearer token (optional, memory only, never stored)',
 			'import.tokenPlaceholder': 'empty = anonymous fetch',
 			'import.fetch': 'Fetch models', 'import.fetching': 'Fetching…',
 			'import.fetchOk': 'Fetched {n} model(s)',
 			'import.fetchFailed': 'Live fetch failed (network/CORS/auth); fell back to built-in preset suggestions.',
-			'import.unsupportedHeader': 'Unsupported (non-media models in the live list)',
+			'import.unsupportedHeader': 'Unsupported (non-media LLM / unsupported ecosystems — not checkable)',
+			'priority.top': 'Top', 'priority.up': 'Up', 'priority.down': 'Down',
+			'priority.default': 'default',
+			'priority.rank': 'rank #{n}',
+			'priority.empty': 'No profiles yet.',
+			'eco.h3': 'MiniMax H3', 'eco.seedance': 'Volcengine Seedance',
+			'eco.families.h3': 'Model families: minimax-h3 (video)',
+			'eco.families.seedance': 'Model families: doubao-seedance (video) / doubao-seedream (image) / seed-tts (audio)',
+			'eco.profiles': 'Profiles',
+			'eco.defaultHit': 'Default hit: yes',
+			'eco.defaultMiss': 'Default hit: no',
+			'eco.unsupportedHeader': 'Unsupported (still explicitly callable)',
+			'tool.installed': 'installed', 'tool.missing': 'missing',
+			'tool.notProbed': 'unchecked (not probed)',
 			'custom.add': 'Add', 'custom.update': 'Save changes', 'custom.delete': 'Delete', 'custom.edit': 'Edit',
+			'custom.confirmDelete': 'Confirm delete?',
+			'custom.deleted': '{id} removed from the draft; press「Save & apply」to commit.',
+			'custom.savedDraft': '{id} written to the draft; press「Save & apply」to commit.',
+			'custom.test': 'Test connection', 'custom.testing': 'Testing…',
+			'custom.testOk': 'reachable · {n} model(s)',
+			'custom.testFail': 'unreachable (network/CORS/auth)',
 			'custom.field.id': 'Profile id', 'custom.field.protocol': 'Protocol',
 			'custom.field.baseUrl': 'Base URL', 'custom.field.authEnv': 'Credential env var name',
 			'custom.field.models': 'Model ids (comma separated)', 'custom.field.modalities': 'Modalities (video/image/audio)',
 			'custom.field.online': 'Online (real submissions allowed)',
 			'custom.invalid': 'Form invalid: {msg}',
 			'custom.empty': 'No custom profiles yet.',
+			'advanced.outputDir': 'outputDir',
+			'advanced.dataDir': 'dataDir',
+			'advanced.providersPatchPath': 'providersPatchPath',
+			'advanced.defaultTimeoutMs': 'defaultTimeoutMs (ms)',
 			'corrupt': 'Stored custom config problem: {msg}',
 			'view.tab': 'Media',
 			'view.description': 'Live profiles, system resource detection and offline H3 downloads.',
@@ -151,18 +263,24 @@ window.__ModuleLoader__.load({
 			'google-gemini': 'SYNTHMEDIA_GEMINI_API_KEY',
 			'openai-media': 'SYNTHMEDIA_OPENAI_API_KEY',
 		};
+		// Phase-two supported set: mirrors src/page/ecosystems.ts
+		// SUPPORTED_ECOSYSTEMS = ['h3', 'seedance'] — everything else is greyed.
+		const SUPPORTED_ECO_KEYS = { 'minimax-h3': 'h3', 'volcengine-seedance': 'seedance' };
+		const TOOL_NAMES = ['ffmpeg', 'imagemagick', 'gimp', 'blender'];
 		//#region tiny view helpers
 
 		const styles = {
 			card: { padding: 14, borderRadius: 10, border: '1px solid var(--dsh-border, #30363d)', display: 'flex', flexDirection: 'column', gap: 12 },
 			section: { display: 'flex', flexDirection: 'column', gap: 6 },
+			sectionHead: { display: 'flex', gap: 8, alignItems: 'flex-start', justifyContent: 'space-between', flexWrap: 'wrap' },
 			title: { fontSize: 13, fontWeight: 600 },
 			desc: { fontSize: 12, opacity: 0.75, lineHeight: 1.5 },
 			row: { display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' },
+			rowItem: { display: 'flex', gap: 8, alignItems: 'center', padding: '6px 8px', borderRadius: 8, border: '1px solid var(--dsh-border, #21262d)' },
+			meta: { fontSize: 11, opacity: 0.7, fontFamily: 'ui-monospace, monospace', wordBreak: 'break-all' },
 			input: { padding: '4px 8px', borderRadius: 6, border: '1px solid var(--dsh-border, #30363d)', background: 'transparent', color: 'inherit', fontSize: 12 },
 			button: { padding: '4px 10px', borderRadius: 6, border: '1px solid var(--dsh-border, #30363d)', background: 'transparent', color: 'inherit', cursor: 'pointer', fontSize: 12 },
-			table: { width: '100%', borderCollapse: 'collapse', fontSize: 12 },
-			cell: { borderBottom: '1px solid var(--dsh-border, #21262d)', padding: '4px 6px', textAlign: 'left', verticalAlign: 'top' },
+			saveBar: { display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', borderTop: '1px solid var(--dsh-border, #30363d)', paddingTop: 10 },
 			badge: (ok, warn) => ({
 				display: 'inline-block', fontSize: 11, padding: '1px 6px', borderRadius: 8,
 				color: ok ? '#3fb950' : warn ? '#d29922' : '#8b949e',
@@ -183,6 +301,36 @@ window.__ModuleLoader__.load({
 			return jsx.jsx('span', { style: styles.badge(key === 'blocked' ? false : ok, key === 'protocol' ? !ok : undefined), children: label }, key + String(ok));
 		}
 
+		/** Status badge with a literal label (eco / default / supported…). */
+		function tagBadge(label, ok) {
+			return jsx.jsx('span', { style: styles.badge(ok !== false), children: label }, 'tag:' + label);
+		}
+
+		/** Uniform Section: title + one-line desc + optional right action + content. */
+		function Section({ id, title, desc, action, children }) {
+			return jsx.jsxs('div', { 'data-section': id, style: styles.section, children: [
+				jsx.jsxs('div', { style: styles.sectionHead, children: [
+					jsx.jsxs('div', { children: [
+						jsx.jsx('div', { style: styles.title, children: title }),
+						jsx.jsx('div', { style: styles.desc, children: desc }),
+					] }),
+					action ?? null,
+				] }),
+				children,
+			] }, 'section:' + id);
+		}
+
+		/** Uniform Row: name + mono meta line + status badges + right actions. */
+		function Row({ k, name, meta, badges, actions, disabled }) {
+			return jsx.jsxs('div', { style: { ...styles.rowItem, ...(disabled ? styles.grey : {}) }, children: [
+				jsx.jsxs('div', { style: { display: 'flex', flexDirection: 'column', gap: 2, flex: 1, minWidth: 0 }, children: [
+					jsx.jsxs('div', { style: styles.row, children: [name, ...(badges ?? [])] }),
+					meta != null && meta !== '' ? jsx.jsx('div', { style: styles.meta, children: meta }) : null,
+				] }),
+				...(actions ?? []),
+			] }, k);
+		}
+
 		/** Lenient client-side parse of the stored customProfiles JSON. */
 		function parseCustomLocal(raw) {
 			if (typeof raw !== 'string' || raw.trim() === '') return { list: [], error: null };
@@ -192,6 +340,20 @@ window.__ModuleLoader__.load({
 				return { list: parsed.filter((e) => e && typeof e === 'object'), error: null };
 			} catch (e) {
 				return { list: [], error: 'customProfiles 不是合法 JSON：' + e.message };
+			}
+		}
+
+		/** Lenient parse of the JSON-array-of-strings volatile fields
+		 * (providerOrder / enabledDshResources / enabledTools). Mirrors
+		 * src/page/priority.ts parseStringArray — degrade, never throw. */
+		function parseListLocal(raw) {
+			if (typeof raw !== 'string' || raw.trim() === '') return { list: [], error: null };
+			try {
+				const parsed = JSON.parse(raw);
+				if (!Array.isArray(parsed)) return { list: [], error: '必须是 JSON 数组' };
+				return { list: parsed.filter((x) => typeof x === 'string' && x.trim() !== ''), error: null };
+			} catch (e) {
+				return { list: [], error: '不是合法 JSON：' + e.message };
 			}
 		}
 
@@ -207,6 +369,17 @@ window.__ModuleLoader__.load({
 			if (/^gpt-image/i.test(id)) return { key: 'openai-media', tag: 'GPT Image', modality: ECOSYSTEM_MODALITIES.gptImage };
 			if (/^sora-?\d/i.test(id)) return { key: 'openai-media', tag: 'Sora 视频', modality: ECOSYSTEM_MODALITIES.sora };
 			return null;
+		}
+
+		/** Coarse ecosystem of a profile: 'h3' | 'seedance' | 'other'
+		 * (mirrors src/page/ecosystems.ts profileGate — id first, the
+		 * minimax-video-compatible protocol as the only tie-breaker). */
+		function mediaEcoOf(p) {
+			const first = (p.models ?? [''])[0] ?? '';
+			const eco = ecosystemOfModel(first);
+			if (eco && SUPPORTED_ECO_KEYS[eco.key] !== undefined) return SUPPORTED_ECO_KEYS[eco.key];
+			if (p.protocol === 'minimax-video-compatible') return 'h3';
+			return 'other';
 		}
 
 		// Import-panel media suggestions: DSH providers declare LLM chat models
@@ -293,6 +466,17 @@ window.__ModuleLoader__.load({
 				return ids.length > 0 ? ids : null;
 			} catch { return null; }
 		}
+
+		/** Client-side install hint (server ToolStatus.installHint wins when a
+		 * tools snapshot is available). Displayed only — never executed. */
+		function installHintLocal(tool) {
+			const pkg = tool === 'imagemagick' ? 'imagemagick' : tool;
+			const p = (typeof navigator !== 'undefined' && typeof navigator.platform === 'string' ? navigator.platform : '').toLowerCase();
+			if (p.includes('mac')) return 'brew install ' + pkg;
+			if (p.includes('win')) return 'winget install ' + (tool === 'gimp' ? 'GIMP.GIMP' : tool === 'blender' ? 'BlenderFoundation.Blender' : pkg);
+			if (p.includes('linux')) return 'sudo apt-get install ' + pkg;
+			return pkg;
+		}
 		//#endregion
 
 		//#region settings card
@@ -309,12 +493,15 @@ window.__ModuleLoader__.load({
 		 *    The card must speak both shapes; reading getSnapshot on the host
 		 *    shape yields undefined and shows the「通道不可用」state even when
 		 *    the channel is healthy.
-		 * The write path: host/live mutate first; the plugin's own bound
-		 * remote.settings.mutate (directMutate, namespace = the profile entry
-		 * id `synthmedia`) is the fallback when the form write refuses.
+		 * The write model (phase two): every interaction only mutates a local
+		 * DRAFT (per-field overrides over the config snapshot); the single
+		 *「保存并生效」button commits ONLY the dirty fields as ONE mutate
+		 * batch — host mutate first, directMutate fallback when no ConfigForm.
 		 */
 		const NO_FORM_SNAP = { status: 'unavailable' };
 		const noopSubscribe = () => () => {};
+		// Config fields the unified draft/save model owns.
+		const DRAFT_FIELDS = ['customProfiles', 'providerOrder', 'enabledDshResources', 'enabledTools', 'outputDir', 'dataDir', 'providersPatchPath', 'defaultTimeoutMs'];
 		function SettingsCard(props) {
 			const { directMutate, t } = props;
 			const view = props.view === 'summary' ? 'summary' : 'page';
@@ -323,6 +510,7 @@ window.__ModuleLoader__.load({
 			// of the old definitions further down).
 			const builtins = Array.isArray(PAGE_DATA.builtins) ? PAGE_DATA.builtins : [];
 			const providers = Array.isArray(PAGE_DATA.providers) ? PAGE_DATA.providers : [];
+			const bakedTools = Array.isArray(PAGE_DATA.tools) ? PAGE_DATA.tools : null;
 			const rawForm = props.form;
 			const hostForm = rawForm !== null && typeof rawForm === 'object'
 				&& typeof rawForm.mutate === 'function'
@@ -336,18 +524,24 @@ window.__ModuleLoader__.load({
 			const snap = hostForm !== undefined ? hostForm.state : liveSnap;
 			const ready = snap !== undefined && snap !== null && snap.status === 'ready';
 			const cfg = ready && snap.value && typeof snap.value === 'object' ? snap.value : {};
-			const [saving, setSaving] = react.useState(false);
+			const [saving, setSaving] = react.useState(false); // legacy tri-state mirror of saveState
 			const [failed, setFailed] = react.useState(false);
 			const [note, setNote] = react.useState(null);
-			const [checked, setChecked] = react.useState({});
-			const [importAuthEnv, setImportAuthEnv] = react.useState('');
-			const [manualModels, setManualModels] = react.useState({});
-			const [draft, setDraft] = react.useState(null); // custom-editor draft (object) or null
+			// Unified draft: per-field overrides over cfg (undefined = untouched).
+			const [draft, setDraft] = react.useState({});
+			const setField = (key, value) => setDraft({ ...draft, [key]: value });
+			const cfgVal = (key) => (draft[key] !== undefined ? draft[key] : cfg[key]);
+			const dirtyKeys = DRAFT_FIELDS.filter((k) => draft[k] !== undefined && draft[k] !== (cfg[k] ?? (k === 'defaultTimeoutMs' ? '' : '')));
 			// Live /v1/models pull state per provider: { ids, error } | undefined.
 			// Fetched once per provider when the detail page mounts; failure keeps
 			// the preset fallback (fetchProviderModels resolves null → error note).
 			const [remoteModels, setRemoteModels] = react.useState({});
 			const [importToken, setImportToken] = react.useState('');
+			const [importAuthEnv, setImportAuthEnv] = react.useState('');
+			const [manualModels, setManualModels] = react.useState({});
+			const [editor, setEditor] = react.useState(null); // custom-editor draft (object) or null
+			const [confirmDelete, setConfirmDelete] = react.useState(null);
+			const [testState, setTestState] = react.useState({});
 			const pullProvider = react.useCallback(async (prov, token) => {
 				setRemoteModels((prev) => ({ ...prev, [prov.id]: { ids: [], error: null, loading: true } }));
 				const ids = await fetchProviderModels(prov.baseURL, token);
@@ -369,36 +563,70 @@ window.__ModuleLoader__.load({
 				if (liveForm && typeof liveForm.mutate === 'function') return liveForm.mutate(ops, revision);
 				return Promise.resolve(false);
 			};
-			// Write path (directMutate fix): when the ConfigForm channel is
+			// Write path (directMutate fix kept): when the ConfigForm channel is
 			// missing (ready=false) the plugin's own remote.settings.mutate is
-			// an INDEPENDENT, fully usable write path — it must stay reachable,
-			// otherwise import/add are dead buttons with no recovery.
+			// an INDEPENDENT, fully usable write path — it must stay reachable.
 			const canDirect = typeof directMutate === 'function';
-			const writeProfiles = (list, okNote) => {
-				if (!ready && !canDirect) return;
+			const commit = (ops) => {
 				setSaving(true); setFailed(false); setNote(null);
-				const op = { op: 'set', path: ['customProfiles'], value: JSON.stringify(list, null, 2) };
 				const guard = setTimeout(() => { setSaving(false); setFailed(true); }, 15000);
+				const finish = (ok) => {
+					clearTimeout(guard); setSaving(false);
+					if (ok) setDraft({});
+					else setFailed(true);
+				};
 				const viaDirect = () => {
-					if (!canDirect) { clearTimeout(guard); setSaving(false); setFailed(true); return; }
-					Promise.resolve(directMutate([op]))
-						.then((answer) => {
-							clearTimeout(guard); setSaving(false);
-							if (answer && typeof answer === 'object' && answer.ok === false) setFailed(true);
-							else setNote({ ok: true, text: okNote });
-						})
-						.catch(() => { clearTimeout(guard); setSaving(false); setFailed(true); });
+					if (!canDirect) { finish(false); return; }
+					Promise.resolve(directMutate(ops))
+						.then((answer) => { finish(!(answer && typeof answer === 'object' && answer.ok === false)); })
+						.catch(() => { finish(false); });
 				};
 				if (!ready) { viaDirect(); return; }
-				Promise.resolve(mutateForm([op], snap.revision))
-					.then((accepted) => {
-						if (accepted !== false) { clearTimeout(guard); setSaving(false); setNote({ ok: true, text: okNote }); return; }
-						viaDirect();
-					})
-					.catch(() => { clearTimeout(guard); setSaving(false); setFailed(true); });
+				Promise.resolve(mutateForm(ops, snap.revision))
+					.then((accepted) => { if (accepted !== false) finish(true); else viaDirect(); })
+					.catch(() => { finish(false); });
+			};
+			// Unified save: ONE batch of set-ops, dirty fields only.
+			const save = () => {
+				const ops = dirtyKeys.map((k) => ({ op: 'set', path: [k], value: draft[k] }));
+				if (ops.length === 0) { setNote({ ok: true, text: t('settings.saved') }); return; }
+				commit(ops);
 			};
 
-			const custom = parseCustomLocal(cfg['customProfiles']);
+			// ---- parsed config views (draft-aware) -------------------------------
+			const customRaw = typeof cfgVal('customProfiles') === 'string' ? cfgVal('customProfiles') : '[]';
+			const custom = parseCustomLocal(customRaw);
+			const orderParse = parseListLocal(typeof cfgVal('providerOrder') === 'string' ? cfgVal('providerOrder') : '[]');
+			const resParse = parseListLocal(typeof cfgVal('enabledDshResources') === 'string' ? cfgVal('enabledDshResources') : '[]');
+			const toolParse = parseListLocal(typeof cfgVal('enabledTools') === 'string' ? cfgVal('enabledTools') : '[]');
+			const resList = resParse.list;
+			const toolList = toolParse.list;
+
+			const profilesAll = [...builtins, ...custom.list];
+			const byId = {};
+			for (const p of profilesAll) byId[p.id] = p;
+			const orderList = orderParse.list;
+			const allIds = [...orderList, ...profilesAll.map((p) => p.id).filter((id) => byId[id] !== undefined && !orderList.includes(id))];
+			// Default profile per modality, client mirror of resolveDefaultProfile:
+			// walk allIds, first profile serving the modality, not blocked, and
+			// in a SUPPORTED ecosystem ('other' never defaults).
+			const defaultIds = (() => {
+				const modalities = new Set();
+				for (const p of profilesAll) for (const m of p.modalities ?? []) modalities.add(m);
+				const out = new Set();
+				for (const m of modalities) {
+					for (const id of allIds) {
+						const p = byId[id];
+						if (!p || !(p.modalities ?? []).includes(m)) continue;
+						if (p.blockRealSubmit === true) continue;
+						if (mediaEcoOf(p) === 'other') continue;
+						out.add(id);
+						break;
+					}
+				}
+				return out;
+			})();
+			const writeCustomList = (list) => setField('customProfiles', JSON.stringify(list, null, 2));
 
 			if (view === 'summary') {
 				// Folded「内置插件配置」row: one line — profile count, or the
@@ -407,52 +635,25 @@ window.__ModuleLoader__.load({
 				return jsx.jsx('span', { children: ready ? t('settings.summaryReady', { n: String(n) }) : t('settings.unavailable') });
 			}
 
-			const profileRow = (p, isCustom) => jsx.jsxs('tr', { key: p.id + (isCustom ? '#custom' : ''), children: [
-				jsx.jsx('td', { style: styles.cell, children: [
-					p.id + ' ',
-					isCustom ? jsx.jsx('span', { style: styles.badge(true), children: 'custom' }) : null,
-					jsx.jsx('br', {}),
-					badge('protocol', p.protocolVerified === true, t),
-					badge('live', p.liveVerified === true, t),
-					badge('online', p.online !== false, t),
-					p.blockRealSubmit ? badge('blocked', false, t) : null,
-				] }),
-				jsx.jsx('td', { style: styles.cell, children: p.protocol }),
-				jsx.jsx('td', { style: { ...styles.cell, fontFamily: 'ui-monospace, monospace' }, children: p.baseUrl ?? p.baseURL }),
-				jsx.jsx('td', { style: styles.cell, children: (p.models ?? []).join(', ') }),
-				jsx.jsx('td', { style: styles.cell, children: p.authEnv ?? '（无需凭据）' }),
-				isCustom ? jsx.jsx('td', { style: styles.cell, children: jsx.jsx('button', {
-					type: 'button', style: styles.button,
-					onClick: () => setDraft({
-						...p,
-						__editing: true,
-						modelsInput: (p.models ?? []).join(','),
-						modalitiesInput: (p.modalities ?? []).join(','),
-					}),
-					children: t('custom.edit'),
-				}) }) : jsx.jsx('td', { style: styles.cell }),
-			] });
-
-			// Import: group supported models per provider+ecosystem. Candidate
-			// sources: (a) suggestionsForProvider — provider-declared ids ∪
-			// base-URL preset matches ∪ manual additions (preset fallback kept);
-			// (b) LIVE /v1/models ids, classified STRICTLY by id pattern — an
-			// id-classifiable remote model joins the supported list with a
-			// 'remote' badge, anything else (LLM / embedding / unknown) is
-			// greyed「暂不支持」 instead of inheriting the preset's protocol.
+			// ---- Sources a) DSH subscription resources ---------------------------
+			// Supported suggestions only: provider-declared / preset-matched /
+			// manual ids whose ecosystem ∈ {h3, seedance}; remote /v1/models ids
+			// classified STRICTLY by id pattern. Everything else (LLM ids AND
+			// classified-but-unsupported ecosystems like wan/imagen/veo) lands in
+			// the greyed unsupported block, not checkable.
 			const suggestionsFor = (prov) => {
 				const base = suggestionsForProvider(prov, builtins, manualModels[prov.id] ?? []);
 				const seen = new Set(base.map((s) => s.id));
+				const out = base.filter((s) => SUPPORTED_ECO_KEYS[s.eco.key] !== undefined);
 				const remoteState = remoteModels[prov.id];
-				const remoteExtra = [];
 				for (const id of remoteState && remoteState.ids || []) {
 					if (seen.has(id)) continue;
 					const eco = ecosystemOfModel(id);
 					if (!eco) continue;
 					seen.add(id);
-					remoteExtra.push({ id, eco, source: 'remote' });
+					if (SUPPORTED_ECO_KEYS[eco.key] !== undefined) out.push({ id, eco, source: 'remote' });
 				}
-				return [...base, ...remoteExtra];
+				return out;
 			};
 			const unsupportedFor = (prov) => {
 				const supported = new Set(suggestionsFor(prov).map((s) => s.id));
@@ -462,9 +663,15 @@ window.__ModuleLoader__.load({
 				for (const id of [...(remoteModels[prov.id] && remoteModels[prov.id].ids || []), ...(manualModels[prov.id] ?? []), ...declared]) {
 					if (supported.has(id) || seen.has(id)) continue;
 					seen.add(id);
-					out.push(id);
+					out.push({ id, eco: ecosystemOfModel(id) });
 				}
 				return out;
+			};
+			const resChecked = (provId, modelId) => resList.includes(provId + '::' + modelId);
+			const toggleResource = (provId, modelId, on) => {
+				const key = provId + '::' + modelId;
+				const next = on ? [...new Set([...resList, key])] : resList.filter((x) => x !== key);
+				setField('enabledDshResources', JSON.stringify(next));
 			};
 			const addManual = (provId, raw) => {
 				const ids = String(raw ?? '').split(/[,;，；\s]+/).map((s) => s.trim()).filter(Boolean);
@@ -481,27 +688,29 @@ window.__ModuleLoader__.load({
 					};
 				});
 			};
+			//「应用勾选」: generate custom-profile drafts from the CHECKED
+			// resources (enabledDshResources is the single source of truth for
+			// checkbox state), grouped per provider+ecosystem. Writes into the
+			// draft; committed by the unified save.
 			const applyImport = () => {
 				const picked = [];
 				const authEnvFor = (eco) => (importAuthEnv.trim() !== '' ? importAuthEnv.trim() : DEFAULT_AUTH_ENV[eco]);
 				for (const prov of providers) {
 					const byEco = {};
 					for (const s of suggestionsFor(prov)) {
-						const eco = s.eco;
-						if (!eco || checked[prov.id + '/' + s.id] !== true) continue;
-						(byEco[eco.key] = byEco[eco.key] || []).push({ id: s.id, modality: eco.modality });
+						if (!resChecked(prov.id, s.id)) continue;
+						const ecoKey = SUPPORTED_ECO_KEYS[s.eco.key];
+						(byEco[ecoKey] = byEco[ecoKey] || []).push({ id: s.id, modality: s.eco.modality });
 					}
 					for (const [eco, list] of Object.entries(byEco)) {
 						const modalities = [...new Set(list.map((m) => m.modality))];
-						// openai-media splits by surface: images API vs videos task API.
-						const protocol = eco === 'openai-media' && modalities.includes('image') && !modalities.includes('video')
-							? 'openai-images-compatible'
-							: ECOSYSTEM_PROTOCOL[eco];
+						// h3/seedance both map 1:1 to their wire protocol here.
+						const protocol = ECOSYSTEM_PROTOCOL[Object.keys(ECOSYSTEM_PROTOCOL).find((k) => SUPPORTED_ECO_KEYS[k] === eco) ?? 'minimax-h3'];
 						picked.push({
 							id: ('dsh-' + prov.id + '-' + eco.replace(/^[a-z]+-/, '')).toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, ''),
 							protocol,
 							baseUrl: prov.baseURL ?? '',
-							authEnv: authEnvFor(eco),
+							authEnv: authEnvFor(eco === 'seedance' ? 'volcengine-seedance' : 'minimax-h3'),
 							models: list.map((m) => m.id),
 							modalities,
 							online: false,
@@ -514,11 +723,13 @@ window.__ModuleLoader__.load({
 					setNote({ ok: false, text: '所选 provider 缺少 http(s) baseURL，无法生成 Profile。' });
 					return;
 				}
-				writeProfiles([...custom.list.filter((p) => !picked.some((q) => q.id === p.id)), ...picked], t('import.applied', { n: picked.length }));
+				writeCustomList([...custom.list.filter((p) => !picked.some((q) => q.id === p.id)), ...picked]);
+				setNote({ ok: true, text: t('import.appliedDraft', { n: String(picked.length) }) });
 			};
 
-			const submitDraft = (mode) => {
-				const d = draft;
+			// ---- Sources b) self-built providers (draft writes) -------------------
+			const submitEditor = (mode) => {
+				const d = editor;
 				if (!d) return;
 				const models = String(d.modelsInput ?? (d.models ?? []).join(',')).split(',').map((s) => s.trim()).filter(Boolean);
 				const modalities = String(d.modalitiesInput ?? (d.modalities ?? []).join(',')).split(',').map((s) => s.trim()).filter((s) => ['video', 'image', 'audio'].includes(s));
@@ -538,133 +749,348 @@ window.__ModuleLoader__.load({
 				if (modalities.length === 0) { setNote({ ok: false, text: t('custom.invalid', { msg: '至少一个模态' }) }); return; }
 				let list = custom.list.filter((p) => p.id !== entry.id);
 				if (mode !== 'delete') list = [...list, entry];
-				writeProfiles(list, mode === 'delete' ? entry.id + ' 已删除' : entry.id + ' 已保存');
-				setDraft(null);
+				writeCustomList(list);
+				setNote({ ok: true, text: mode === 'delete' ? t('custom.deleted', { id: entry.id }) : t('custom.savedDraft', { id: entry.id }) });
+				setEditor(null);
+			};
+			// Danger op: delete needs a SECOND click on the confirm button.
+			const deleteCustom = (id) => {
+				if (confirmDelete !== id) { setConfirmDelete(id); return; }
+				setConfirmDelete(null);
+				writeCustomList(custom.list.filter((p) => p.id !== id));
+				setNote({ ok: true, text: t('custom.deleted', { id }) });
+			};
+			const runConnectionTest = async (p) => {
+				setTestState((prev) => ({ ...prev, [p.id]: { loading: true } }));
+				const ids = await fetchProviderModels(p.baseUrl ?? p.baseURL, '');
+				setTestState((prev) => ({ ...prev, [p.id]: ids === null ? { fail: true } : { ok: ids.length } }));
 			};
 
-			const draftField = (label, key, opts = {}) => jsx.jsxs('div', { style: styles.row, children: [
+			const editorField = (label, key, opts = {}) => jsx.jsxs('div', { style: styles.row, children: [
 				jsx.jsx('span', { style: { ...styles.desc, minWidth: 130 }, children: label }),
 				opts.choices
-					? jsx.jsx('select', { style: styles.input, value: draft[key] ?? '', onChange: (e) => setDraft({ ...draft, [key]: e.target.value }), children: opts.choices.map((c) => jsx.jsx('option', { value: c, children: c }, c)) })
-					: jsx.jsx('input', { style: { ...styles.input, minWidth: 260 }, type: opts.bool ? 'checkbox' : 'text', ...(opts.bool ? { checked: draft[key] !== false } : { value: draft[key] ?? '' }), onChange: (e) => setDraft({ ...draft, [key]: opts.bool ? e.target.checked : e.target.value }) }),
+					? jsx.jsx('select', { style: styles.input, value: editor[key] ?? '', onChange: (e) => setEditor({ ...editor, [key]: e.target.value }), children: opts.choices.map((c) => jsx.jsx('option', { value: c, children: c }, c)) })
+					: jsx.jsx('input', { style: { ...styles.input, minWidth: 260 }, type: opts.bool ? 'checkbox' : 'text', ...(opts.bool ? { checked: editor[key] !== false } : { value: editor[key] ?? '' }), onChange: (e) => setEditor({ ...editor, [key]: opts.bool ? e.target.checked : e.target.value }) }),
 			] }, key);
+
+			const priorityRow = (id, i) => {
+				const p = byId[id];
+				const eco = p ? mediaEcoOf(p) : 'other';
+				return Row({
+					k: 'prio:' + id,
+					name: jsx.jsx('code', { children: id }),
+					meta: p ? [p.protocol, p.baseUrl ?? p.baseURL, 'models=[' + (p.models ?? []).join(', ') + ']'].filter(Boolean).join(' · ') : '',
+					badges: [
+						eco !== 'other' ? tagBadge(t('badge.supported') + ' · ' + eco, true) : tagBadge(t('badge.unsupported'), false),
+						...(orderList.includes(id) ? [jsx.jsx('span', { style: styles.meta, children: t('priority.rank', { n: String(orderList.indexOf(id) + 1) }) })] : []),
+						...(defaultIds.has(id) ? [tagBadge(t('priority.default'), true)] : []),
+						...(p && p.blockRealSubmit === true ? [badge('blocked', false, t)] : []),
+					],
+					actions: [
+						jsx.jsx('button', { type: 'button', style: styles.button, disabled: i === 0, onClick: () => movePriority(id, 0), children: t('priority.top') }),
+						jsx.jsx('button', { type: 'button', style: styles.button, disabled: i === 0, onClick: () => movePriority(id, i - 1), children: t('priority.up') }),
+						jsx.jsx('button', { type: 'button', style: styles.button, disabled: i === allIds.length - 1, onClick: () => movePriority(id, i + 1), children: t('priority.down') }),
+					],
+				});
+			};
+			const movePriority = (id, toIndex) => {
+				const arr = [...allIds];
+				const i = arr.indexOf(id);
+				if (i < 0) return;
+				arr.splice(i, 1);
+				arr.splice(Math.max(0, Math.min(arr.length, toIndex)), 0, id);
+				setField('providerOrder', JSON.stringify(arr));
+			};
+
+			// ---- overview data -----------------------------------------------------
+			const modalitiesAll = [...new Set(profilesAll.flatMap((p) => p.modalities ?? []))];
+			const defaultsText = modalitiesAll.length === 0 ? t('overview.noDefault')
+				: modalitiesAll.map((m) => {
+					const hit = [...allIds].find((id) => defaultIds.has(id) && byId[id] && (byId[id].modalities ?? []).includes(m));
+					return m + ' → ' + (hit ?? t('overview.noDefault'));
+				}).join('\n');
+			const warningsAll = [
+				...(Array.isArray(PAGE_DATA.configWarnings) ? PAGE_DATA.configWarnings : []),
+				...(custom.error ? [custom.error] : []),
+				...(orderParse.error ? ['providerOrder：' + orderParse.error] : []),
+				...(resParse.error ? ['enabledDshResources：' + resParse.error] : []),
+				...(toolParse.error ? ['enabledTools：' + toolParse.error] : []),
+			];
+			const installedEnabled = bakedTools
+				? toolList.filter((name) => (bakedTools.find((x) => x.name === name) ?? {}).installed === true).length
+				: null;
+			const h3Verdict = typeof PAGE_DATA.h3Verdict === 'string' && PAGE_DATA.h3Verdict !== '' ? PAGE_DATA.h3Verdict : null;
+
+			const canSave = (ready || canDirect) && !saving && dirtyKeys.length > 0;
+			const saveBar = jsx.jsxs('div', { style: styles.saveBar, children: [
+				dirtyKeys.length > 0 ? jsx.jsx('span', { style: styles.note, children: t('settings.saveDirty', { n: String(dirtyKeys.length) }) }) : null,
+				saving ? jsx.jsx('span', { style: styles.muted, children: t('settings.saving') }) : null,
+				failed ? jsx.jsx('span', { style: styles.note, children: t('settings.saveFailed') }) : null,
+				jsx.jsx('button', { type: 'button', style: { ...styles.button, fontWeight: 600 }, disabled: !canSave, onClick: save, children: t('settings.save') }),
+			] });
 
 			return jsx.jsxs('div', { style: styles.card, children: [
 				jsx.jsxs('div', { style: styles.section, children: [
 					jsx.jsx('div', { style: styles.title, children: t('settings.title') }),
 					jsx.jsx('div', { style: styles.desc, children: t('settings.description') }),
+					!ready ? jsx.jsx('div', { style: styles.muted, children: t('settings.unavailable') }) : null,
 				] }),
-				jsx.jsxs('div', { style: styles.section, children: [
-					jsx.jsx('div', { style: styles.title, children: t('section.profiles') }),
-					jsx.jsx('div', { style: styles.desc, children: t('section.profilesDesc') }),
-					ready ? jsx.jsx('table', { style: styles.table, children: [
-						jsx.jsx('thead', { children: jsx.jsxs('tr', { children: [
-							['Profile', 'Protocol', 'Base URL', 'Models', '凭据环境变量名', ''].map((h, i) => jsx.jsx('th', { style: styles.cell, children: h }, 'h' + i)),
-						] }) }),
-						jsx.jsx('tbody', { children: [...builtins.map((p) => profileRow(p, false)), ...custom.list.map((p) => profileRow(p, true))] }),
-					] }) : jsx.jsx('div', { style: styles.muted, children: t('settings.unavailable') }),
-					custom.error ? jsx.jsx('div', { style: styles.note, children: t('corrupt', { msg: custom.error }) }) : null,
-				] }),
-				jsx.jsxs('div', { style: styles.section, children: [
-					jsx.jsx('div', { style: styles.title, children: t('section.import') }),
-					jsx.jsx('div', { style: styles.desc, children: t('section.importDesc') }),
-					providers.length === 0
-						? jsx.jsx('div', { style: styles.muted, children: t('import.none') })
-						: jsx.jsxs('div', { style: { display: 'flex', flexDirection: 'column', gap: 8 }, children: [
-							jsx.jsx('div', { style: styles.desc, children: t('import.manualHint') }),
-						jsx.jsxs('div', { style: styles.row, children: [
-							jsx.jsx('span', { style: styles.desc, children: t('import.tokenLabel') }),
-							jsx.jsx('input', {
-								type: 'password', style: { ...styles.input, minWidth: 220 },
-								value: importToken, placeholder: t('import.tokenPlaceholder'),
-								onChange: (e) => setImportToken(e.target.value),
-							}),
-							...providers.map((prov) => typeof prov.baseURL === 'string' && prov.baseURL.trim() !== ''
-								? jsx.jsx('button', {
-									type: 'button', style: styles.button,
-									disabled: remoteModels[prov.id] !== undefined && remoteModels[prov.id].loading === true,
-									onClick: () => void pullProvider(prov, importToken),
-									children: remoteModels[prov.id] !== undefined && remoteModels[prov.id].loading === true
-										? t('import.fetching') : t('import.fetch') + ' · ' + (prov.displayName ?? prov.id),
-								}, 'fetch:' + prov.id)
-								: []),
+
+				// ① Overview — pure status, no actions.
+				Section({
+					id: 'overview', title: t('section.overview'), desc: t('section.overviewDesc'),
+					children: jsx.jsxs('div', { style: styles.rowItem, children: [
+						jsx.jsxs('div', { style: { display: 'flex', flexDirection: 'column', gap: 2, flex: 1 }, children: [
+							jsx.jsx('div', { style: styles.desc, children: t('overview.profiles') + ': ' + profilesAll.length }),
+							jsx.jsx('div', { style: styles.pre, children: t('overview.defaults') + ': ' + defaultsText }),
+							jsx.jsx('div', { style: styles.desc, children: t('overview.h3') + ': ' + (h3Verdict ?? t('overview.h3Unknown')) }),
+							jsx.jsx('div', { style: styles.desc, children: t('overview.toolsReady') + ': ' + (installedEnabled !== null
+								? installedEnabled + ' / ' + toolList.length
+								: toolList.length + (toolList.length > 0 ? '（' + t('tool.notProbed') + '）' : '')) }),
 						] }),
-							...providers.map((prov) => {
-								const suggestions = suggestionsFor(prov);
-								const remoteState = remoteModels[prov.id];
-								const unsupported = unsupportedFor(prov);
-								return jsx.jsxs('div', { style: { ...styles.section, marginLeft: 8 }, children: [
-									jsx.jsxs('div', { style: styles.desc, children: [
-										(prov.displayName ?? prov.id) + ' · ' + (prov.baseURL ?? ''),
-										remoteState && remoteState.loading !== true && remoteState.error === null && remoteState.ids.length > 0
-											? ' · ' + t('import.fetchOk', { n: String(remoteState.ids.length) })
-											: null,
-										remoteState && remoteState.loading !== true && remoteState.error !== null
-											? jsx.jsx('span', { style: { ...styles.desc, color: '#d29922' }, children: ' · ' + t('import.fetchFailed') }) : null,
-									] }),
-									suggestions.length === 0
-										? jsx.jsx('div', { style: { ...styles.muted, marginLeft: 8 }, children: '（未发现受支持的媒体模型；可手动补充）' })
-										: jsx.jsx('div', { style: { display: 'flex', flexDirection: 'column', gap: 4 }, children: suggestions.map((s) => {
-											const key = prov.id + '/' + s.id;
-											return jsx.jsxs('label', { style: styles.row, children: [
-												jsx.jsx('input', { type: 'checkbox', checked: checked[key] === true, onChange: (e) => setChecked({ ...checked, [key]: e.target.checked }) }),
-												jsx.jsx('code', { children: s.id }),
-												jsx.jsx('span', { style: styles.badge(true), children: s.eco.tag }),
-												s.source === 'provider' ? null : jsx.jsx('span', { style: styles.badge(s.source === 'preset'), children: s.source === 'preset' ? 'preset' : (remoteState && remoteState.ids.includes(s.id) ? 'remote' : 'manual') }),
-											] }, key);
-										}) }),
-									unsupported.length > 0 ? jsx.jsxs('div', { style: { display: 'flex', flexDirection: 'column', gap: 2, marginLeft: 8 }, children: [
-										jsx.jsx('div', { style: { ...styles.desc, color: '#8b949e' }, children: t('import.unsupportedHeader') + '（' + unsupported.length + '）' }),
-										jsx.jsx('div', { style: { ...styles.grey, fontSize: 12, display: 'flex', flexWrap: 'wrap', gap: 4 }, children: unsupported.map((id) => jsx.jsxs('span', { style: styles.row, children: [jsx.jsx('code', { children: id }), ' ' + t('import.unsupported')] }, id)) }),
-									] }, 'unsupported:' + prov.id) : null,
+					] }),
+					action: null,
+				}),
+				warningsAll.length > 0 ? jsx.jsx('div', { style: styles.note, children: warningsAll.map((w) => t('overview.warnings') + '：' + w).join('\n') }) : null,
+
+				// ② Sources — a) DSH subscription checkboxes, b) self-built providers.
+				Section({
+					id: 'sources', title: t('section.sources'), desc: t('section.sourcesDesc'),
+					children: jsx.jsxs('div', { style: { display: 'flex', flexDirection: 'column', gap: 8 }, children: [
+						jsx.jsxs('div', { style: styles.section, children: [
+							jsx.jsx('div', { style: styles.title, children: t('sources.dsh') }),
+							jsx.jsx('div', { style: styles.desc, children: t('sources.dshDesc') }),
+							providers.length === 0
+								? jsx.jsx('div', { style: styles.muted, children: t('import.none') })
+								: jsx.jsxs('div', { style: { display: 'flex', flexDirection: 'column', gap: 8 }, children: [
+									jsx.jsx('div', { style: styles.desc, children: t('import.manualHint') }),
 									jsx.jsxs('div', { style: styles.row, children: [
+										jsx.jsx('span', { style: styles.desc, children: t('import.tokenLabel') }),
 										jsx.jsx('input', {
-											style: { ...styles.input, minWidth: 220 },
-											value: (manualModels['__input__' + prov.id] ?? ''),
-											placeholder: t('import.manualPlaceholder'),
-											onChange: (e) => setManualModels({ ...manualModels, ['__input__' + prov.id]: e.target.value }),
+											type: 'password', style: { ...styles.input, minWidth: 220 },
+											value: importToken, placeholder: t('import.tokenPlaceholder'),
+											onChange: (e) => setImportToken(e.target.value),
 										}),
-										jsx.jsx('button', {
-											type: 'button', style: styles.button,
-											onClick: () => addManual(prov.id, manualModels['__input__' + prov.id]),
-											children: t('import.manualAdd'),
-										}),
-									] }, 'manual:' + prov.id),
-								] }, prov.id);
-							}),
+										...providers.map((prov) => typeof prov.baseURL === 'string' && prov.baseURL.trim() !== ''
+											? jsx.jsx('button', {
+												type: 'button', style: styles.button,
+												disabled: remoteModels[prov.id] !== undefined && remoteModels[prov.id].loading === true,
+												onClick: () => void pullProvider(prov, importToken),
+												children: remoteModels[prov.id] !== undefined && remoteModels[prov.id].loading === true
+													? t('import.fetching') : t('import.fetch') + ' · ' + (prov.displayName ?? prov.id),
+											}, 'fetch:' + prov.id)
+											: []),
+									] }),
+									...providers.map((prov) => {
+										const suggestions = suggestionsFor(prov);
+										const remoteState = remoteModels[prov.id];
+										const unsupported = unsupportedFor(prov);
+										return jsx.jsxs('div', { style: { ...styles.section, marginLeft: 8 }, children: [
+											jsx.jsxs('div', { style: styles.desc, children: [
+												(prov.displayName ?? prov.id) + ' · ' + (prov.baseURL ?? ''),
+												remoteState && remoteState.loading !== true && remoteState.error === null && remoteState.ids.length > 0
+													? ' · ' + t('import.fetchOk', { n: String(remoteState.ids.length) })
+													: null,
+												remoteState && remoteState.loading !== true && remoteState.error !== null
+													? jsx.jsx('span', { style: { ...styles.desc, color: '#d29922' }, children: ' · ' + t('import.fetchFailed') }) : null,
+											] }),
+											suggestions.length === 0
+												? jsx.jsx('div', { style: { ...styles.muted, marginLeft: 8 }, children: '（未发现受支持的媒体模型；可手动补充）' })
+												: jsx.jsx('div', { style: { display: 'flex', flexDirection: 'column', gap: 4 }, children: suggestions.map((s) => {
+													const key = prov.id + '::' + s.id;
+													return jsx.jsxs('label', { style: styles.row, children: [
+														jsx.jsx('input', { type: 'checkbox', checked: resChecked(prov.id, s.id), onChange: (e) => toggleResource(prov.id, s.id, e.target.checked) }),
+														jsx.jsx('code', { children: s.id }),
+														tagBadge(s.eco.tag, true),
+														s.source === 'provider' ? null : tagBadge(s.source === 'preset' ? 'preset' : (remoteState && remoteState.ids.includes(s.id) ? 'remote' : 'manual'), s.source === 'preset'),
+													] }, key);
+												}) }),
+											unsupported.length > 0 ? jsx.jsxs('div', { style: { display: 'flex', flexDirection: 'column', gap: 2, marginLeft: 8 }, children: [
+												jsx.jsx('div', { style: { ...styles.desc, color: '#8b949e' }, children: t('import.unsupportedHeader') + '（' + unsupported.length + '）' }),
+												jsx.jsx('div', { style: { display: 'flex', flexDirection: 'column', gap: 2 }, children: unsupported.map((u) => Row({
+													k: 'unsupported:' + prov.id + ':' + u.id,
+													disabled: true,
+													name: jsx.jsxs('span', { style: styles.row, children: [
+														jsx.jsx('input', { type: 'checkbox', disabled: true, checked: false, readOnly: true }),
+														jsx.jsx('code', { children: u.id }),
+													] }),
+													badges: u.eco ? [tagBadge(u.eco.tag, false), tagBadge(t('import.unsupported'), false)] : [tagBadge(t('import.unsupported'), false)],
+													actions: [],
+												}) ) }),
+											] }, 'unsupported:' + prov.id) : null,
+											jsx.jsxs('div', { style: styles.row, children: [
+												jsx.jsx('input', {
+													style: { ...styles.input, minWidth: 220 },
+													value: (manualModels['__input__' + prov.id] ?? ''),
+													placeholder: t('import.manualPlaceholder'),
+													onChange: (e) => setManualModels({ ...manualModels, ['__input__' + prov.id]: e.target.value }),
+												}),
+												jsx.jsx('button', {
+													type: 'button', style: styles.button,
+													onClick: () => addManual(prov.id, manualModels['__input__' + prov.id]),
+													children: t('import.manualAdd'),
+												}),
+											] }, 'manual:' + prov.id),
+										] }, prov.id);
+									}),
+									jsx.jsxs('div', { style: styles.row, children: [
+										jsx.jsx('span', { style: styles.desc, children: t('import.authEnv') }),
+										jsx.jsx('input', { style: { ...styles.input, minWidth: 220 }, value: importAuthEnv, onChange: (e) => setImportAuthEnv(e.target.value), placeholder: DEFAULT_AUTH_ENV['volcengine-seedance'] + ' / ' + DEFAULT_AUTH_ENV['minimax-h3'] }),
+										jsx.jsx('button', { type: 'button', style: styles.button, disabled: (!ready && !canDirect) || saving, onClick: applyImport, children: t('import.apply') }),
+									] }),
+								] }),
 						] }),
-					providers.length > 0 ? jsx.jsxs('div', { style: styles.row, children: [
-						jsx.jsx('span', { style: styles.desc, children: t('import.authEnv') }),
-						jsx.jsx('input', { style: { ...styles.input, minWidth: 220 }, value: importAuthEnv, onChange: (e) => setImportAuthEnv(e.target.value), placeholder: DEFAULT_AUTH_ENV['volcengine-seedance'] + ' / ' + DEFAULT_AUTH_ENV['minimax-h3'] }),
-						jsx.jsx('button', { type: 'button', style: styles.button, disabled: (!ready && !canDirect) || saving, onClick: applyImport, children: t('import.apply') }),
-					] }) : null,
-				] }),
-				jsx.jsxs('div', { style: styles.section, children: [
-					jsx.jsx('div', { style: styles.title, children: t('section.custom') }),
-					jsx.jsx('div', { style: styles.desc, children: t('section.customDesc') }),
-					draft === null
-						? jsx.jsx('button', { type: 'button', style: styles.button, disabled: (!ready && !canDirect), onClick: () => setDraft({ id: '', protocol: 'openai-video-compatible', baseUrl: '', authEnv: '', modelsInput: '', modalitiesInput: 'video', online: false }), children: t('custom.add') })
-						: jsx.jsxs('div', { style: { ...styles.card, borderStyle: 'dashed' }, children: [
-							draftField(t('custom.field.id'), 'id'),
-							draftField(t('custom.field.protocol'), 'protocol', { choices: PROTOCOL_OPTIONS }),
-							draftField(t('custom.field.baseUrl'), 'baseUrl'),
-							draftField(t('custom.field.authEnv'), 'authEnv'),
-							draftField(t('custom.field.models'), 'modelsInput'),
-							draftField(t('custom.field.modalities'), 'modalitiesInput'),
-							draftField(t('custom.field.online'), 'online', { bool: true }),
-							jsx.jsxs('div', { style: styles.row, children: [
-								draft.__editing
-									? jsx.jsx('button', { type: 'button', style: styles.button, onClick: () => submitDraft('update'), children: t('custom.update') })
-									: jsx.jsx('button', { type: 'button', style: styles.button, onClick: () => submitDraft('add'), children: t('custom.add') }),
-								jsx.jsx('button', { type: 'button', style: { ...styles.button, color: '#f85149' }, onClick: () => submitDraft('delete'), children: t('custom.delete') }),
-								jsx.jsx('button', { type: 'button', style: styles.button, onClick: () => setDraft(null), children: '×' }),
+						jsx.jsxs('div', { style: styles.section, children: [
+							jsx.jsx('div', { style: styles.title, children: t('sources.custom') }),
+							jsx.jsx('div', { style: styles.desc, children: t('sources.customDesc') }),
+							editor === null
+								? jsx.jsx('button', { type: 'button', style: styles.button, disabled: (!ready && !canDirect), onClick: () => setEditor({ id: '', protocol: 'openai-video-compatible', baseUrl: '', authEnv: '', modelsInput: '', modalitiesInput: 'video', online: false }), children: t('custom.add') })
+								: jsx.jsxs('div', { style: { ...styles.card, borderStyle: 'dashed' }, children: [
+									editorField(t('custom.field.id'), 'id'),
+									editorField(t('custom.field.protocol'), 'protocol', { choices: PROTOCOL_OPTIONS }),
+									editorField(t('custom.field.baseUrl'), 'baseUrl'),
+									editorField(t('custom.field.authEnv'), 'authEnv'),
+									editorField(t('custom.field.models'), 'modelsInput'),
+									editorField(t('custom.field.modalities'), 'modalitiesInput'),
+									editorField(t('custom.field.online'), 'online', { bool: true }),
+									jsx.jsxs('div', { style: styles.row, children: [
+										editor.__editing
+											? jsx.jsx('button', { type: 'button', style: styles.button, onClick: () => submitEditor('update'), children: t('custom.update') })
+											: jsx.jsx('button', { type: 'button', style: styles.button, onClick: () => submitEditor('add'), children: t('custom.add') }),
+										editor.__editing ? jsx.jsx('button', { type: 'button', style: { ...styles.button, color: '#f85149' }, onClick: () => submitEditor('delete'), children: t('custom.delete') }) : null,
+										jsx.jsx('button', { type: 'button', style: styles.button, onClick: () => setEditor(null), children: '×' }),
+									] }),
+								] }),
+							custom.list.length === 0 ? jsx.jsx('div', { style: styles.muted, children: t('custom.empty') }) : jsx.jsx('div', { style: { display: 'flex', flexDirection: 'column', gap: 4 }, children: custom.list.map((p) => {
+								const st = testState[p.id];
+								return Row({
+									k: 'custom:' + p.id,
+									name: jsx.jsxs('span', { style: styles.row, children: [
+										jsx.jsx('code', { children: p.id }),
+										tagBadge('custom', true),
+										p.online !== false ? badge('online', true, t) : badge('online', false, t),
+										p.blockRealSubmit === true ? badge('blocked', false, t) : null,
+									] }),
+									meta: [p.protocol, p.baseUrl, 'models=[' + (p.models ?? []).join(', ') + ']', 'modalities=[' + (p.modalities ?? []).join(', ') + ']', p.authEnv ? 'authEnv=' + p.authEnv : ''].filter(Boolean).join(' · '),
+									badges: [badge('protocol', p.protocolVerified === true, t), badge('live', p.liveVerified === true, t)],
+									actions: [
+										jsx.jsx('button', { type: 'button', style: styles.button, onClick: () => void runConnectionTest(p), children: st && st.loading ? t('custom.testing') : t('custom.test') }),
+										st && st.ok !== undefined ? jsx.jsx('span', { style: styles.good, children: t('custom.testOk', { n: String(st.ok) }) }) : null,
+										st && st.fail ? jsx.jsx('span', { style: styles.note, children: t('custom.testFail') }) : null,
+										jsx.jsx('button', { type: 'button', style: styles.button, onClick: () => setEditor({ ...p, __editing: true, modelsInput: (p.models ?? []).join(','), modalitiesInput: (p.modalities ?? []).join(',') }), children: t('custom.edit') }),
+										jsx.jsx('button', { type: 'button', style: { ...styles.button, ...(confirmDelete === p.id ? { color: '#f85149', fontWeight: 600 } : { color: '#f85149' }) }, onClick: () => deleteCustom(p.id), children: confirmDelete === p.id ? t('custom.confirmDelete') : t('custom.delete') }),
+									],
+								});
+							}) }),
+						] }),
+					] }),
+				}),
+
+				// ③ Priority — one global ordered list (chosen over per-modality
+				// grouping: simpler, and providerOrder IS a single flat array, so
+				// one column directly expresses「按顺序来」; the meta line + default
+				// badge still exposes which profile each modality resolves to).
+				Section({
+					id: 'priority', title: t('section.priority'), desc: t('section.priorityDesc'),
+					children: jsx.jsx('div', { style: { display: 'flex', flexDirection: 'column', gap: 4 }, children:
+						allIds.length === 0 ? jsx.jsx('div', { style: styles.muted, children: t('priority.empty') }) : allIds.map((id, i) => priorityRow(id, i)),
+					} ),
+				}),
+
+				// ④ Ecosystems — display-only cards for h3 + seedance, others collapsed.
+				Section({
+					id: 'ecosystems', title: t('section.ecosystems'), desc: t('section.ecosystemsDesc'),
+					children: jsx.jsxs('div', { style: { display: 'flex', flexDirection: 'column', gap: 6 }, children: [
+						['h3', 'seedance'].map((eco) => {
+							const members = profilesAll.filter((p) => mediaEcoOf(p) === eco);
+							const hit = members.some((p) => defaultIds.has(p.id));
+							return jsx.jsxs('div', { style: { ...styles.rowItem, flexDirection: 'column', alignItems: 'stretch' }, children: [
+								jsx.jsxs('div', { style: styles.row, children: [
+									jsx.jsx('span', { style: styles.title, children: eco === 'h3' ? t('eco.h3') : t('eco.seedance') }),
+									tagBadge(t('badge.supported'), true),
+								] }),
+								jsx.jsx('div', { style: styles.meta, children: eco === 'h3' ? t('eco.families.h3') : t('eco.families.seedance') }),
+								jsx.jsx('div', { style: styles.desc, children: t('eco.profiles') + ': ' + members.length }),
+								jsx.jsx('div', { style: styles.desc, children: hit ? t('eco.defaultHit') : t('eco.defaultMiss') }),
+							] }, 'eco:' + eco);
+						}),
+						jsx.jsx('details', { children: [
+							jsx.jsx('summary', { style: styles.desc, children: t('eco.unsupportedHeader') + '（' + profilesAll.filter((p) => mediaEcoOf(p) === 'other').length + '）' }),
+							jsx.jsx('div', { style: { display: 'flex', flexDirection: 'column', gap: 4, marginTop: 6 }, children: profilesAll.filter((p) => mediaEcoOf(p) === 'other').map((p) => Row({
+								k: 'ecooth:' + p.id,
+								disabled: true,
+								name: jsx.jsx('code', { children: p.id }),
+								meta: [p.protocol, 'models=[' + (p.models ?? []).join(', ') + ']'].join(' · '),
+								badges: [tagBadge(t('badge.unsupported'), false)],
+								actions: [],
+							}) ) }),
+						] }),
+					] }),
+				}),
+
+				// ⑤ Toolchain — four checkboxes; probe status from the baked tools
+				// snapshot when present, install hint always (display only).
+				Section({
+					id: 'toolchain', title: t('section.toolchain'), desc: t('section.toolchainDesc'),
+					children: jsx.jsx('div', { style: { display: 'flex', flexDirection: 'column', gap: 4 }, children: TOOL_NAMES.map((name) => {
+						const on = toolList.includes(name);
+						const baked = bakedTools ? bakedTools.find((x) => x.name === name) : null;
+						const installed = baked ? baked.installed === true : null;
+						const hint = baked && baked.installHint ? baked.installHint : installHintLocal(name);
+						return Row({
+							k: 'tool:' + name,
+							name: jsx.jsxs('span', { style: styles.row, children: [
+								jsx.jsx('input', { type: 'checkbox', checked: on, onChange: (e) => {
+									const next = e.target.checked ? [...new Set([...toolList, name])] : toolList.filter((x) => x !== name);
+									setField('enabledTools', JSON.stringify(next));
+								} }),
+								jsx.jsx('code', { children: name }),
 							] }),
+							meta: jsx.jsxs('span', { children: [
+								installed === true ? '✓ ' + t('tool.installed') + (baked.path ? ' · ' + baked.path : '') + (baked.version ? ' · ' + baked.version : '')
+									: installed === false ? '✗ ' + t('tool.missing')
+									: t('tool.notProbed'),
+								' · install: ',
+								jsx.jsx('code', { children: hint }),
+							] }),
+							badges: installed === true ? [tagBadge(t('tool.installed'), true)] : installed === false ? [tagBadge(t('tool.missing'), false)] : [],
+							actions: [],
+						});
+					}) }),
+				}),
+
+				// ⑥ Advanced — collapsed, kept out of the main flow.
+				Section({
+					id: 'advanced', title: t('section.advanced'), desc: t('section.advancedDesc'),
+					children: jsx.jsx('details', { children: [
+						jsx.jsx('summary', { style: styles.desc, children: t('section.advanced') }),
+						jsx.jsx('div', { style: { display: 'flex', flexDirection: 'column', gap: 6, marginTop: 6 }, children: [
+							jsx.jsxs('div', { style: styles.row, children: [
+								jsx.jsx('span', { style: { ...styles.desc, minWidth: 180 }, children: t('advanced.outputDir') }),
+								jsx.jsx('input', { style: { ...styles.input, minWidth: 260 }, value: String(cfgVal('outputDir') ?? ''), onChange: (e) => setField('outputDir', e.target.value) }),
+							] }, 'adv:outputDir'),
+							jsx.jsxs('div', { style: styles.row, children: [
+								jsx.jsx('span', { style: { ...styles.desc, minWidth: 180 }, children: t('advanced.dataDir') }),
+								jsx.jsx('input', { style: { ...styles.input, minWidth: 260 }, value: String(cfgVal('dataDir') ?? ''), onChange: (e) => setField('dataDir', e.target.value) }),
+							] }, 'adv:dataDir'),
+							jsx.jsxs('div', { style: styles.row, children: [
+								jsx.jsx('span', { style: { ...styles.desc, minWidth: 180 }, children: t('advanced.providersPatchPath') }),
+								jsx.jsx('input', { style: { ...styles.input, minWidth: 260 }, value: String(cfgVal('providersPatchPath') ?? ''), onChange: (e) => setField('providersPatchPath', e.target.value) }),
+							] }, 'adv:providersPatchPath'),
+							jsx.jsxs('div', { style: styles.row, children: [
+								jsx.jsx('span', { style: { ...styles.desc, minWidth: 180 }, children: t('advanced.defaultTimeoutMs') }),
+								jsx.jsx('input', { style: { ...styles.input, minWidth: 260 }, value: String(cfgVal('defaultTimeoutMs') ?? ''), onChange: (e) => {
+									const n = Number(e.target.value);
+									if (e.target.value.trim() !== '' && Number.isFinite(n) && n > 0) setField('defaultTimeoutMs', n);
+								} }),
+							] }, 'adv:defaultTimeoutMs'),
 						] }),
-					custom.list.length === 0 ? jsx.jsx('div', { style: styles.muted, children: t('custom.empty') }) : null,
-				] }),
+					] }),
+				}),
+
+				// Unified save bar: ONE button commits all dirty fields in one batch.
+				saveBar,
 				note !== null ? jsx.jsx('div', { style: note.ok ? styles.good : styles.note, children: note.text }) : null,
-				saving ? jsx.jsx('div', { style: styles.muted, children: t('settings.saving') }) : null,
-				failed ? jsx.jsx('div', { style: styles.note, children: t('settings.saveFailed') }) : null,
 			] });
 		}
 		//#endregion

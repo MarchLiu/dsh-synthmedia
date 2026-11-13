@@ -330,8 +330,9 @@ Operational notes for the official API:
 |---|---|---|---|---|---|
 | vLLM-Omni (`vllm serve <model> --omni`) | ❌ | ❌ | ✅ (CUDA) | NVIDIA (H200-class recommended for H3) | Official H3 recipe + `/v1/videos` |
 | SGLang diffusion (`sglang.launch_server`) | ❌ | ❌ | ✅ (CUDA) | NVIDIA | Official MiniMax-H3 cookbook |
-| GGUF via `sd-cli --mode vid_gen` | ✅ | ✅ | ✅ | Apple Silicon / NVIDIA / Vulkan | Per [`unsloth/MiniMax-H3-GGUF`](https://huggingface.co/unsloth/MiniMax-H3-GGUF); quantized, lower quality. Plain `ollama run` is **not** a documented H3 video path. |
-| MLX serving (community) | ✅ (Apple Silicon) | ❌ | ❌ | Apple M-series | Optional, never the default. |
+| GGUF via `sd-cli` ([stable-diffusion.cpp](https://github.com/leejet/stable-diffusion.cpp)) | ✅ | ✅ | ✅ | Apple Silicon / NVIDIA / Vulkan | Day-1 H3 support (2026-08-04). Weights: [`unsloth/MiniMax-H3-GGUF`](https://huggingface.co/unsloth/MiniMax-H3-GGUF), **~33 GiB** for the Q4 combo. Pruned + quantized ⇒ lower quality. Requires `--mode vid_gen --cfg-scale 1.0 --offload-to-cpu`. Plain `ollama run` is **not** an H3 video path. |
+| Native Metal ([antirez/h3.c](https://github.com/antirez/h3.c)) | ✅ (Apple Silicon) | ❌ | ❌ | M3/M5-class | MIT, original BF16 weights (no conversion), measured on M5 Max by upstream: 512²/22-frame 19-pass denoise **36.3 s**. Last commit 2026-08-11 (unmaintained). |
+| MLX serving (community) | ✅ (Apple Silicon) | ❌ | ❌ | Apple M-series | [MacOS-H3-Speedrun](https://github.com/EvolvingLMMs-Lab/MacOS-H3-Speedrun) / [mlx-h3](https://github.com/appautomaton/mlx-h3); Turbo LoRA + Sol-Attn, fastest measured 480p/5 s ≈ 3m14s on M3 Ultra. |
 
 Windows: no officially documented H3 *diffusion* runtime supports it; use WSL2
 or the GGUF `sd-cli` path.
@@ -347,44 +348,158 @@ export SYNTHMEDIA_LOCAL_H3_SIDECAR_BASE_URL=http://127.0.0.1:8091
 python -m sglang.launch_server --model-path MiniMaxAI/MiniMax-H3
 export SYNTHMEDIA_LOCAL_H3_SIDECAR_BASE_URL=http://127.0.0.1:30000
 
-# C: GGUF quantized (cross-platform, lower quality)
-#   sd-cli --mode vid_gen   (see the GGUF model card above)
+# C: GGUF quantized + stable-diffusion.cpp (lightest: ~33 GiB, cross-platform)
+sd-cli --mode vid_gen --diffusion-model minimax_h3_fl2va_pruned-Q4_K.gguf \
+  --llm qwen3vl_32b_minimax_h3-Q4_K_M.gguf --vae <video_vae> --audio-vae <audio_vae> \
+  --cfg-scale 1.0 --offload-to-cpu --rng cpu --fps 24
+export SYNTHMEDIA_LOCAL_H3_SIDECAR_BASE_URL=http://127.0.0.1:<port>   # via the /v1/videos shim
 
-# D: existing intranet videogen service
+# D: native Metal engine for Apple Silicon (original BF16, no conversion)
+git clone https://github.com/antirez/h3.c && cd h3.c && make -j8
+./h3 --info -d ./MiniMax-H3
+
+# E: existing intranet videogen service
 export SYNTHMEDIA_LOCAL_H3_BASE_URL=https://your-videogen-host
 ```
+
+## Priority & routing (providerOrder)
+
+`providerOrder` is a volatile Config field (JSON array string of profile ids; earlier
+wins). Routing only **reorders** — every profile stays usable, an unlisted profile
+simply ranks after all listed ones in its existing order. For each modality the
+plugin picks the first profile in this order that (a) serves the modality,
+(b) doesn't `blockRealSubmit`, and (c) passes the ecosystem gate (`supported: true`);
+that profile is reported as `effectiveDefault: true` in
+`synthmedia_capabilities` (absent ⇒ unranked). Saving `providerOrder` from the
+Config page triggers a hot refresh (`VOLATILE_REBUILD_KEYS`), so the next
+capabilities result and the config page reflect the new order without
+restarting DSH. Generation itself always takes an explicit `backend` id —
+priority only decides which profile is reported as the effective default;
+there is still **no fallback**: a job is pinned to the chosen profile and a
+failure is `E_OFFLINE_UNAVAILABLE`, never a silent reroute. Pure logic lives in
+`src/page/priority.ts` (`parseOrder` / `orderProfiles` / `resolveDefaultProfile`)
+and is unit-tested against corrupted JSON (degrade, never throw).
+
+## Ecosystem gate (h3 / seedance)
+
+`src/page/ecosystems.ts` classifies every model into one ecosystem — `h3`
+(MiniMax-H3 family), `seedance` (Doubao Seedance/Seedream/Seed-TTS) or `other`
+(wan, Gemini, OpenAI images, …). Only `h3` and `seedance` are in
+`SUPPORTED_ECOSYSTEMS`; `other` is **not** default-routable: its gate reports
+`supported: false` with a reason string, and it is skipped when picking the
+effective default profile. Unsupported does **not** mean unusable — an explicit
+`backend` id in `synthmedia_generate` still calls the profile directly, exactly
+as before; the gate only decides who may win default routing. Each backend in
+`capabilities` therefore carries `ecosystem` / `supported` / `ecosystemReason`
+alongside `priority` and `effectiveDefault`, so agents can reason about why a
+profile is (or is not) the default. Gates are per-model via `modelGate` and
+aggregated per-profile via `profileGate`, which classifies a profile by its
+default model (profiles are single-ecosystem by construction).
+
+## Toolchain detection (enabledTools)
+
+`enabledTools` is a volatile Config field listing which local tools matter to
+you (`ffmpeg` / `imagemagick` / `gimp` / `blender`); unknown names are dropped
+with a warning, corrupted JSON degrades to defaults. Detection (`src/page/toolchain.ts`)
+probes only **enabled** tools via `which` + `--version` (ffmpeg uses `-version`;
+ImageMagick probes `magick` and falls back to legacy `convert` when absent or
+unresponsive), so disabled tools are never spawned. Results surface in three
+places: the `snapshot` (Config page「媒体服务」tab), `/synthmedia detect` command,
+and `synthmedia_capabilities` → `tools` (`enabled` / `installed` / `path` /
+`version` / `installHint`, platform-aware hints). All probes are injectable,
+so tests run without spawning processes.
+
+## Offline H3 guide
+
+完整离线部署指引在 [docs/offline-h3.md](docs/offline-h3.md)：本机实测表、阈值判定、
+五条路径（GGUF + sd.cpp 最省空间约 33 GiB；h3.c 原生 Metal 直接吃 BF16；MLX +
+Turbo LoRA 质量档；远端 vLLM-Omni / SGLang 是速度上限；内网 videogen 走 `local-h3`）
+逐条命令、体积实测、故障排查与「未核验」清单。快速入口：
+
+```bash
+# 1. 探测本机硬件 + 工具链，给出阈值判定与推荐路径（只读，不下载）
+node scripts/h3-setup.mjs --plan
+# 2. 按清单下载模型文件（Diffusers 结构外的单文件补拉）
+node scripts/h3-setup.mjs --download [--only <id>] [--data-dir synthmedia-data]
+# 3. 健康检查一个已部署的 sidecar 端点
+node scripts/h3-setup.mjs --check http://127.0.0.1:8091
+```
+
+接入后用 `SYNTHMEDIA_LOCAL_H3_SIDECAR_BASE_URL` / `_MODEL`（或内网 videogen 的
+`SYNTHMEDIA_LOCAL_H3_BASE_URL`）指向服务，`synthmedia_capabilities` 里确认
+`supported: true` 再发起首次生成。
 
 ## Config page (GUI settings card +「媒体服务」session tab)
 
 The plugin ships a browser half (`exports["./client"]`, built by
 `scripts/build-client.mjs` into `lib/client.js` as a hand-written ModuleLoader
-module — the same mechanism dsh-cybernetics uses). After a host restart:
+module — the same mechanism dsh-cybernetics uses). After a host restart the
+Plugins page shows ONE settings card (seats `plugins.item` /
+`plugins.row.config` / `plugins.bundle.config`, bound to the plugin's
+ConfigForm) with a fixed six-section information architecture, top to bottom:
 
-- **Settings card** (Plugins page, seats `plugins.item` / `plugins.row.config`
-  / `plugins.bundle.config`, bound to the plugin's ConfigForm derived from the
-  exported schemastery `Config` schema):
-  - 生效中的 ProviderProfile 一览（内置 preset + 自定义），含 protocol /
-    baseURL / 模型清单 / 凭据环境变量名（只有名字，绝无密钥值）与
-    协议✓✗ / 实测✓✗ / 在线 / 已封锁 徽标；
-  - 「从 DSH providers 导入」：构建时把 profile cordis.patch.yml 的
-    providers 快照烘焙进 client（运行时以会话页为准），仅火山 Seedance 生态
-    （seedance/seedream/seed-tts 模型 id）与 MiniMax H3 生态可勾选，其余置灰
-    「暂不支持」；勾选后生成 synthmedia 自定义 Profile 写回 `customProfiles`
-    配置字段（宿主 settings API，插件重载即生效）；
-  - 「自定义 Provider / 模型」表单：id、协议下拉、baseURL、凭据环境变量名、
-    模型 id、模态、在线开关；支持编辑与删除。
-- **「媒体服务」conversation tab**：通过 `/synthmedia` 命令通道读实时数据
-  （命令注册形态与 dsh-cybernetics `/cybernetics` 相同，不经模型）：
-  - 实时 Profile 列表（含运行时 env 覆盖后的真实生效值）；
-  - 系统资源检测（`/synthmedia detect`）与离线 H3 三档评估；
-  - 离线模型下载（`/synthmedia dl list|start <id>|cancel <id>`），运行中每
-    3 秒自动刷新，宿主 Jobs UI 同步可见（kind `synthmedia-download`）。
+1. **概览 Overview** — read-only status strip: effective profile count, the
+   default profile per modality, the offline-H3 verdict (when a detection
+   result is available), toolchain readiness, plus every parse warning
+   (`configWarnings` + client-side JSON parse errors). No action buttons.
+2. **资源来源 Sources** —
+   a. **DSH 订阅账户**: checkbox list built from the baked providers snapshot
+      (live data via the session tab). Only h3 / seedance ecosystem models are
+      checkable; anything else (LLM ids AND other ecosystems like
+      wan/imagen/veo) is greyed「暂不支持」and not checkable. Checks write
+      `enabledDshResources` (entries shaped `"providerId::modelId"`).
+     「应用勾选」turns the checked resources into custom-profile DRAFTS
+      (preserving remote `/v1/models` fetch, memory-only Bearer token and the
+      preset fallback); remote pull failure shows `import.fetchFailed` and
+      falls back to baseURL-matched preset suggestions.
+   b. **自建 Provider（影像专用）**: list + add/edit/delete + enable(online)/
+      test-connection; fields id / protocol (dropdown) / baseURL / credential
+      env-var NAME / model ids / modalities / online — writes `customProfiles`.
+      Delete requires a second confirming click. Credential VALUES never enter
+      the DOM (the optional fetch token is a `type=password` input, memory
+      only).
+3. **优先级 Priority** — ONE global ordered list (chosen over per-modality
+   grouping: `providerOrder` IS a flat array, and a single column directly
+   expresses「按顺序来」). Each row: profile id + mono meta line (protocol ·
+   baseURL · models) + ecosystem badge + rank + per-modality「默认」badge +
+   上移/下移/置顶 — writes `providerOrder` (JSON array of profile ids, earlier
+   wins). The section states explicitly: generation still takes an explicit
+   backend; this order only picks each modality's DEFAULT profile and the
+   display order — it never auto-falls-back.
+4. **生态 Ecosystems** — display-only cards for **h3** and **seedance**
+   (model families, current profile count, default-hit yes/no); all other
+   ecosystems collapse under「未支持（仍可显式调用）」(they never become the
+   default but remain callable via an explicit backend id). No delete.
+5. **工具链 Toolchain** — ffmpeg / imagemagick / gimp / blender checkboxes;
+   each row shows probe status (installed ✓ with path/version from the tools
+   snapshot, or missing ✗ with a copyable one-line install hint). Checks write
+   `enabledTools`; unchecked tools are NOT probed (same contract as the
+   backend).
+6. **高级 Advanced** — outputDir / dataDir / providersPatchPath /
+   defaultTimeoutMs, collapsed by default.
 
-Storage: user customisation lives ONLY in the plugin's own `customProfiles`
-config field (JSON string) written through the host settings API — it is
-schema-validated on every read (`src/page/custom.ts`) and a corrupt payload
-degrades to a warning + empty list, never a failed boot. It is never written
-into the cordis.patch.yml registration row by hand.
+**Interaction consistency** (one implementation, shared by every section): a
+single `Section` component (title + one-line description + optional action +
+content) and a single `Row` component (name + monospace meta + status badge +
+right-aligned actions). All edits go to a LOCAL DRAFT; ONE「保存并生效」button
+commits ONLY the dirty fields as ONE mutate batch — the host ConfigForm first,
+the plugin's own `remote.settings.mutate` (`directMutate`) as an independent
+fallback when no ConfigForm is served — with saving/saved/failed states and an
+unsaved-changes banner. The three volatile JSON fields
+(`providerOrder` / `enabledDshResources` / `enabledTools`) plus
+`customProfiles` hot-reload via `VOLATILE_REBUILD_KEYS` on save.
+
+**「媒体服务」conversation tab** (unchanged): live profile list, system
+detection (`/synthmedia detect`) with the offline-H3 verdict, and offline
+model downloads (`/synthmedia dl list|start <id>|cancel <id>`, 3s polling,
+host Jobs UI kind `synthmedia-download`).
+
+Storage: user customisation lives ONLY in the plugin's config fields
+(`customProfiles` JSON string + the three volatile JSON-array strings above)
+written through the host settings API — `customProfiles` is schema-validated
+on every read (`src/page/custom.ts`) and corrupt payloads degrade to a warning
++ empty list, never a failed boot. Credential values are never stored; only
+env-var NAMES.
 
 ### 系统资源检测阈值（评估「能否运行离线 H3」）
 
@@ -395,7 +510,7 @@ Probes: `os.cpus/totalmem/arch/platform`、目标目录 `fs.statfs`、darwin
 | 维度 | 充足 | 勉强 | 不足 | 来源 |
 |---|---|---|---|---|
 | 内存 | ≥73 GiB | ≥48 GiB | 更低 | 73 GiB 为任务给定值（4-bit H3 统一内存）；48 GiB 为估算 |
-| 磁盘（目标目录可用） | ≥80 GiB | ≥45 GiB | 更低 | 估算（模型文件 + 运行时开销） |
+| 磁盘（目标目录可用） | ≥480 GiB | ≥40 GiB | 更低 | **实测尺寸**：40 GiB = GGUF Q4 组合 33 GiB + 余量；480 GiB = 整仓 BF16 464.2 GiB + 余量（FL2VA 单族 133.8 GiB） |
 | CPU | ≥8 核 | ≥4 核 | 更低 | 估算（sidecar 单流） |
 | 运行时 | python/uv/node 齐备 | 缺 1 项 | 缺 ≥2 项 | sidecar 需要 python+uv |
 
