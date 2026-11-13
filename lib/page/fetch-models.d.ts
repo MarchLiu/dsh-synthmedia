@@ -15,6 +15,22 @@ export interface HostAddress {
 }
 /** Async hostname → addresses resolver; injectable so tests never hit DNS. */
 export type HostLookup = (hostname: string) => Promise<readonly HostAddress[]>;
+/** Production resolver: every A/AAAA record, not just the first one. */
+export declare const systemLookup: HostLookup;
+type Resolution = {
+    readonly ok: true;
+    readonly addresses: readonly string[];
+} | {
+    readonly ok: false;
+    readonly reason: string;
+};
+/**
+ * Resolve a hostname and reject when ANY answer is loopback/private/
+ * link-local. Rejecting on any private record is what stops split-horizon and
+ * single-record rebinding tricks; an unresolvable or empty answer set is also
+ * refused (a request to it could only fail, so fail closed before dispatch).
+ */
+export declare function resolvePublicHost(host: string, lookup: HostLookup, phase: string): Promise<Resolution>;
 export type GuardedModelListUrl = {
     readonly ok: true;
     readonly url: string;
@@ -63,3 +79,4 @@ export declare function fetchRemoteModels(baseURL: unknown, opts?: {
 }): Promise<RemoteModelsResult>;
 /** Preset baseUrls of the effective config (the explicit allowlist). */
 export declare function presetBaseUrls(config: Record<string, unknown>): string[];
+export {};

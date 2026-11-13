@@ -22,6 +22,7 @@
 import { createReadStream, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import type { HostJobRegistry } from '../jobs.js';
+import type { HostLookup } from './fetch-models.js';
 export interface DownloadEntry {
     readonly id: string;
     readonly name: string;
@@ -70,14 +71,28 @@ export interface ByteSource {
  * Build the default ByteSource over node:http(s) GET with a Range header on
  * resume. Follows up to MAX_REDIRECTS 301/302/307/308 hops (HF/ModelScope
  * resolve URLs 302 to their CDN), re-sending the Range header on every hop.
- * Each redirect Location is SSRF-guarded (loopback/private/link-local refused
- * via the shared isPrivateHost check) so a public URL cannot bounce the
- * downloader at an internal address; `allowRedirectHost` can only WIDEN that
- * guard (tests use it to point at a local mock origin); the final response
- * must still be 200/206 (enforced by DownloadManager.run).
+ * Each redirect Location is SSRF-guarded at TWO levels so a public URL cannot
+ * bounce the downloader at an internal address:
+ *  - literal: loopback/private/link-local hostnames are refused via the
+ *    shared isPrivateHost check;
+ *  - DNS: the redirect hostname is then resolved through resolvePublicHost
+ *    (same guard as the model-list fetch channel) and ANY private/loopback/
+ *    link-local/CGNAT/ULA/IPv4-mapped answer refuses the hop — this catches
+ *    rebinding names such as 127.0.0.1.nip.io whose literal host is public
+ *    but whose DNS answer is not. An exact allowRedirectHost match can only
+ *    WIDEN the guard (tests use it to point at a local mock origin); hosts it
+ *    allows skip both levels.
+ *  - TOCTOU: for DNS redirect targets the connection itself uses a controlled
+ *    `lookup` (verifiedLookupOf) so the socket binds to a re-verified public
+ *    address; HTTPS keeps Host/SNI from the URL hostname.
+ * The first URL of a download is intentionally not DNS-guarded (operator-
+ * supplied manifest); the final response must still be 200/206 (enforced by
+ * DownloadManager.run).
  */
 export declare function createHttpByteSource(opts?: {
     allowRedirectHost?: (hostname: string) => boolean;
+    /** Injectable DNS resolver (tests mock it; production uses system A/AAAA). */
+    lookup?: HostLookup;
 }): ByteSource;
 /** Production byte source: strict SSRF guard on every redirect hop. */
 export declare const httpByteSource: ByteSource;
