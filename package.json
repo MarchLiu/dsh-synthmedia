@@ -1,0 +1,86 @@
+{
+  "name": "dsh-synthmedia",
+  "version": "0.1.0",
+  "description": "SynthMedia: provider-agnostic media generation for DSH agents. Three decoupled layers (ProtocolAdapter / ProviderProfile / ModelCapability) with unified async jobs, host Jobs UI, artifacts and five agent tools. Protocols: volcengine-ark-compatible (Seedance/Seedream/Seed TTS), openai-video-compatible (zgci hub, vLLM-Omni/SGLang sidecar), videogen-task-api. Any compatible gateway is added by configuration only.",
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "client",
+    "src",
+    "scripts",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json && node scripts/build-client.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --test \"test/*.test.mjs\"",
+    "test:unit": "node --test test/unit.test.mjs",
+    "test:contract": "node --test test/contract.test.mjs",
+    "smoke:apply": "node scripts/mock-apply-smoke.mjs",
+    "prepublishOnly": "pnpm run build && pnpm test"
+  },
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "plugin",
+    "media-generation",
+    "video",
+    "image",
+    "audio",
+    "multimodal",
+    "h3",
+    "minimax",
+    "seedance",
+    "seedream"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/MarchLiu/dsh-synthmedia.git"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dsh": {
+    "engines": {
+      "dsh": ">=0.2.0-rc.1"
+    },
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-api-session-controller",
+        "@deepseek-ai/dsh-client-ui-primitives",
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-renderer",
+        "@deepseek-ai/dsh-client-ui-session",
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-ui-commands"
+      ],
+      "platform": "web",
+      "immediately": true
+    }
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.6.0"
+  },
+  "dependencies": {
+    "@deepseek-ai/schemastery": "^3.19.0",
+    "yaml": "^2.9.1"
+  }
+}

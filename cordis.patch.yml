@@ -1,0 +1,34 @@
+# dsh-synthmedia bundle patch: inserts the plugin row into the profile roster.
+# Installed with:
+#   dsh plugin --profile web add link:/Users/mars/jobs/dsh-synthmedia
+#
+# Dual-face plugin: the Node half (src/index.ts) registers the five agent
+# tools, the unified JobManager (host Jobs UI kind `synthmedia`), the config
+# page services (system detection + offline-model downloads, host Jobs UI kind
+# `synthmedia-download`) and the /synthmedia command; the browser half
+# (exports["./client"], declared via dsh.client) renders the「SynthMedia」
+# settings card on the Plugins page (same plugins.item / row.config /
+# bundle.config seats as dsh-cybernetics) and a「媒体服务」conversation tab
+# that drives /synthmedia for live data.
+#
+# Credentials are references only (env-var NAMES), resolved per call; with no
+# environment exported the plugin runs in the intended "installed, awaiting
+# keys" state: capabilities reports profiles unavailable instead of erroring.
+#
+# Optional config (all keys optional; defaults shown — the same fields appear
+# as the plugin's settings form, exported schemastery Config schema):
+#   - id: synthmedia
+#     config:
+#       outputDir: synthmedia-output      # or SYNTHMEDIA_OUTPUT_DIR
+#       dataDir: synthmedia-data          # downloads manifest + model files
+#       providersPatchPath: ''            # profile cordis.patch.yml (read-only) for import
+#       customProfiles: '[]'              # user-authored profiles (JSON string, schema-validated)
+#       defaultTimeoutMs: 1800000
+#
+# NOTE: user customisation happens through the settings form / config page,
+# which writes config via the host settings API (user patch rows) — never edit
+# the registration row below by hand.
+- insert:
+    - id: synthmedia
+      name: dsh-synthmedia
+      config: {}
