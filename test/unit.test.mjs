@@ -38,10 +38,14 @@ test('config: defaults include all required backends with correct routing', () =
   assert.equal(cfg.backends['bza-seedream'].model, 'doubao-seedream-5.0-flash');
   assert.deepEqual(cfg.backends['bza-seedream'].models, ['doubao-seedream-5.0-flash', 'doubao-seedream-5.0-pro']);
   assert.equal(cfg.backends['bza-seed-tts'].model, 'doubao-seed-tts-2.0');
-  // verification metadata: relay untested ⇒ protocolVerified false, TTS hard-blocked
-  for (const id of ['bza-seedance', 'bza-seedream', 'bza-seed-tts']) {
+  // verification metadata: seedance live-verified 2026-11-17 (task
+  // cgt-c-20261117152106-dtbms); seedream live-verified 2026-11-17
+  // (doubao-seedream-5.0-pro, HTTP 200); TTS hard-blocked (gateway 404s)
+  for (const id of ['bza-seed-tts']) {
     assert.equal(cfg.backends[id].protocolVerified, false, `${id} protocolVerified must be false`);
   }
+  assert.equal(cfg.backends['bza-seedream'].protocolVerified, true, 'bza-seedream protocolVerified must be true (verified 2026-11-17)');
+  assert.equal(cfg.backends['bza-seedance'].protocolVerified, true, 'bza-seedance protocolVerified must be true (verified 2026-11-17)');
   assert.equal(cfg.backends['bza-seed-tts'].blockRealSubmit, true);
   assert.equal(cfg.backends['zgci-h3'].protocolVerified, true);
   // bza base URL default is the bza proxy, never the public Ark address

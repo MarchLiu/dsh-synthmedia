@@ -322,7 +322,7 @@ test('bza-seed-tts: real submission is HARD-BLOCKED (E_PROTOCOL_UNVERIFIED, zero
   }
 });
 
-test('capabilities: bza backends advertise verbatim doubao IDs + protocolVerified=false; zgci/sidecar verified=true', async () => {
+test('capabilities: bza backends advertise verbatim doubao IDs; seedance+seedream verified=true (2026-11-17 live runs), seed-tts stays locked', async () => {
   delete process.env.SYNTHMEDIA_BZA_SEEDANCE_MODEL;
   delete process.env.SYNTHMEDIA_BZA_SEEDREAM_MODEL;
   const { resolveConfig } = await import('../lib/config.js');
@@ -334,13 +334,16 @@ test('capabilities: bza backends advertise verbatim doubao IDs + protocolVerifie
   assert.deepEqual(byId['bza-seedance'].models, ['doubao-seedance-2.0', 'doubao-seedance-2.0-fast', 'doubao-seedance-2.0-mini', 'doubao-seedance-2.5']);
   assert.deepEqual(byId['bza-seedream'].models, ['doubao-seedream-5.0-flash', 'doubao-seedream-5.0-pro']);
   assert.deepEqual(byId['bza-seed-tts'].models, ['doubao-seed-tts-2.0']);
-  // Unverified deployments must NOT be able to submit anything for real:
-  // every bza preset defaults to protocolVerified=false + realSubmitAllowed=false.
-  assert.equal(byId['bza-seedance'].protocolVerified, false);
-  assert.equal(byId['bza-seedream'].protocolVerified, false);
+  // bza-seedance live-verified 2026-11-17 (task cgt-c-20261117152106-dtbms);
+  // bza-seedream live-verified 2026-11-17 (doubao-seedream-5.0-pro, HTTP 200,
+  // 2496x1664 JPEG, synthmedia-output/bza-seedream-real/);
+  // seed-tts remains unverified: /api/v3/tts/submit and /tts/submit both
+  // returned HTTP 404 empty-body on the gateway (2026-11-17) ⇒ locked.
+  assert.equal(byId['bza-seedance'].protocolVerified, true);
+  assert.equal(byId['bza-seedream'].protocolVerified, true);
   assert.equal(byId['bza-seed-tts'].protocolVerified, false);
-  assert.equal(byId['bza-seedance'].realSubmitAllowed, false, 'unverified protocol must block real submit');
-  assert.equal(byId['bza-seedream'].realSubmitAllowed, false);
+  assert.equal(byId['bza-seedance'].realSubmitAllowed, true, 'verified protocol must allow real submit');
+  assert.equal(byId['bza-seedream'].realSubmitAllowed, true, 'verified protocol must allow real submit');
   assert.equal(byId['bza-seed-tts'].realSubmitAllowed, false);
   assert.equal(byId['zgci-h3'].protocolVerified, true);
   assert.equal(byId['local-h3-sidecar'].protocolVerified, true);
