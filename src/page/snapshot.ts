@@ -175,6 +175,36 @@ export function loadProviders(patchPath?: string): { providers: readonly DshProv
   }
 }
 
+/** Minimal structural face of the JobManager the page commands use. */
+export interface PageJobs {
+  get(id: string): Promise<{
+    id: string;
+    artifacts: ReadonlyArray<{ path: string }>;
+    owner?: string;
+    ancestors?: readonly string[];
+  } | undefined>;
+  list(filter?: { owner?: string; session?: string; limit?: number }): Promise<Array<Record<string, unknown>>>;
+  cancel(id: string): Promise<Record<string, unknown>>;
+}
+
+/**
+ * Session-scope gate for one job record: a caller session sees its own jobs
+ * and the jobs of the agents it spawned (their `ancestors` chain contains the
+ * caller). An unscoped call (no caller identity — same-process tests, direct
+ * module use) keeps the old behaviour. This is the authority for `cancel`,
+ * `reveal` and the `owner` argument of `jobs`, so one conversation can never
+ * read or stop another conversation's generation.
+ */
+function jobVisibleTo(
+  job: { owner?: string; ancestors?: readonly string[] } | undefined,
+  caller: string | undefined,
+): boolean {
+  if (caller === undefined) return true;
+  if (job === undefined) return false;
+  if (job.owner === caller) return true;
+  return Array.isArray(job.ancestors) && job.ancestors.includes(caller);
+}
+
 /** Services the page command handlers run against. */
 export interface PageServices {
   readonly manager: DownloadManager;
@@ -189,6 +219,17 @@ export interface PageServices {
   readonly detectTools?: (enabled: readonly ToolName[]) => Promise<readonly ToolStatus[]>;
   /** Optional system-report collector (tests inject a stub; defaults to real probes). */
   readonly collectReport?: (dir: string) => Promise<SystemReport>;
+  /** Optional JobManager face for `/synthmedia jobs` + `reveal`. */
+  readonly jobs?: PageJobs;
+  /** Absolute output root for the reveal fence (resolve(outputDir)). */
+  readonly outputRoot?: () => string;
+  /**
+   * Reveal implementation (defaults to task-agent.revealArtifact with
+   * process.platform). Tests inject a spy — never spawn in tests.
+   */
+  readonly reveal?: (filePath: string) => Promise<void>;
+  /** Origin-absolute download route base when the host webserver is present. */
+  downloadBase?: string;
 }
 
 export function createPageServices(
@@ -196,6 +237,8 @@ export function createPageServices(
   options: PageOptions,
   hostJobs?: unknown,
   resolveCredential?: (name: string) => Promise<string | undefined>,
+  jobs?: PageJobs,
+  outputRoot?: () => string,
 ): PageServices {
   mkdirSync(options.dataDir, { recursive: true });
   const downloadsDir = join(options.dataDir, 'downloads');
@@ -205,7 +248,14 @@ export function createPageServices(
   // Load the operator-edited manifest (falls back to defaults, never throws).
   void manager.loadManifest(join(options.dataDir, 'downloads.json'));
   void resolved;
-  return { manager, options, config, ...(resolveCredential ? { resolveCredential } : {}) };
+  return {
+    manager,
+    options,
+    config,
+    ...(resolveCredential ? { resolveCredential } : {}),
+    ...(jobs ? { jobs } : {}),
+    ...(outputRoot ? { outputRoot } : {}),
+  };
 }
 
 export async function pageDetect(services: PageServices): Promise<{ report: SystemReport; assessment: H3Assessment }> {
@@ -242,7 +292,7 @@ export function renderText(services: PageServices, providers: readonly DshProvid
   } else {
     lines.push(`DSH providers（${providers.length} 个）：火山 Seedance / MiniMax H3 / 阿里万相 / Gemini / OpenAI 生态可导入，其余暂不支持。`);
   }
-  lines.push(`子命令：/synthmedia json | providers | detect | fetch-models <baseURL> | dl list|start <id>|cancel <id>`);
+  lines.push(`子命令：/synthmedia json | providers | detect | jobs [owner] | reveal <jobId> | fetch-models <baseURL> | dl list|start <id>|cancel <id>`);
   return lines.join('\n');
 }
 
@@ -253,7 +303,9 @@ export function renderText(services: PageServices, providers: readonly DshProvid
 export async function runPageCommand(
   services: PageServices,
   rawInput: string,
+  opts?: { caller?: string },
 ): Promise<{ kind: 'success' | 'error'; text: string; json?: unknown }> {
+  const caller = typeof opts?.caller === 'string' && opts.caller.length > 0 ? opts.caller : undefined;
   const input = rawInput.trim();
   const arg = input.toLowerCase();
   const providers = loadProviders(services.options.providersPatchPath);
@@ -320,6 +372,93 @@ export async function runPageCommand(
       };
     } catch (err) {
       return { kind: 'error', text: `检测失败：${err instanceof Error ? err.message : String(err)}` };
+    }
+  }
+  if (arg.startsWith('cancel ')) {
+    // Cancel one running job from the sidebar / command face (the same
+    // cooperative cancellation the synthmedia_cancel tool performs).
+    const parts = input.split(/\s+/);
+    const jobId = parts[1];
+    if (!jobId) return { kind: 'error', text: '用法：/synthmedia cancel <jobId>' };
+    if (!services.jobs) return { kind: 'error', text: '取消不可用：此命令需要 JobManager（插件宿主半提供）。' };
+    try {
+      const existing = await services.jobs.get(jobId);
+      if (!existing) return { kind: 'error', text: `任务 ${jobId} 不存在。` };
+      if (!jobVisibleTo(existing, caller)) return { kind: 'error', text: '无权操作其它会话的生成任务。' };
+      const record = await services.jobs.cancel(jobId);
+      return { kind: 'success', text: `已请求取消：${jobId}`, json: record };
+    } catch (err) {
+      return { kind: 'error', text: `取消失败：${err instanceof Error ? err.message : String(err)}` };
+    }
+  }
+  if (arg === 'jobs' || arg.startsWith('jobs ')) {
+    // Sub-task list: running first, then recent finished; optional owner
+    // filter (the calling agent session id) shapes the per-session view.
+    if (!services.jobs) return { kind: 'error', text: '任务列表不可用：此命令需要 JobManager（插件宿主半提供）。' };
+    // `jobs [--limit N] [owner]`: the panel pages through an old conversation's
+    // history with --limit (records are never pruned), 50 by default, 200 max.
+    const parts = input.split(/\s+/);
+    let requestedOwner: string | undefined;
+    let limit = 50;
+    for (let i = 1; i < parts.length; i += 1) {
+      const token = parts[i];
+      if (token === '--limit' || token === '-n') {
+        const value = Number(parts[i + 1]);
+        if (Number.isFinite(value) && value > 0) limit = Math.min(Math.floor(value), 200);
+        i += 1;
+        continue;
+      }
+      if (requestedOwner === undefined && !token.startsWith('-')) requestedOwner = token;
+    }
+    // Default scope is the CALLER'S SESSION TREE (its own jobs + the jobs of
+    // the agents it spawned). An explicit owner argument is honored only for
+    // the caller itself: one conversation must not enumerate another's jobs.
+    if (requestedOwner !== undefined && caller !== undefined && requestedOwner !== caller) {
+      return { kind: 'error', text: '只能查看本会话（含其子代理）的生成任务。' };
+    }
+    const listFilter = requestedOwner !== undefined && caller === undefined
+      ? { owner: requestedOwner, limit }
+      : caller !== undefined
+        ? { session: caller, limit }
+        : { limit };
+    const jobs = await services.jobs.list(listFilter);
+    const lines = jobs.map((j) => {
+      const r = j as Record<string, unknown>;
+      const arts = Array.isArray(r['artifacts']) ? r['artifacts'] as Array<Record<string, unknown>> : [];
+      return `- ${r['id']} [${r['status']}] ${r['progress'] ?? 0}% ${r['backend']}/${r['model']} (${r['modality']})` +
+        ` owner=${typeof r['owner'] === 'string' ? r['owner'] : '—'}` +
+        (arts.length > 0 ? ` artifacts=${arts.map((a) => a['path']).join(', ')}` : '') +
+        (r['error'] && typeof r['error'] === 'object' ? ` error=[${(r['error'] as Record<string, unknown>)['code']}]` : '');
+    });
+    return {
+      kind: 'success',
+      text: lines.length > 0 ? `SynthMedia 任务（${jobs.length}，运行中优先）：\n${lines.join('\n')}` : '当前没有生成任务。',
+      json: { jobs, ...(services.downloadBase ? { downloadBase: services.downloadBase } : {}) },
+    };
+  }
+  if (arg.startsWith('reveal')) {
+    // Open the containing folder of one job's artifact in the OS file manager.
+    // Fenced to the output root; the platform dispatch spawns (no shell).
+    const parts = input.split(/\s+/);
+    const jobId = parts[1];
+    if (!jobId) return { kind: 'error', text: '用法：/synthmedia reveal <jobId>' };
+    if (!services.jobs || !services.outputRoot) return { kind: 'error', text: '打开目录不可用：此命令需要 JobManager（插件宿主半提供）。' };
+    const job = await services.jobs.get(jobId);
+    if (!job || !Array.isArray(job.artifacts) || job.artifacts.length === 0) {
+      return { kind: 'error', text: `任务 ${jobId} 不存在或还没有产物。` };
+    }
+    if (!jobVisibleTo(job, caller)) return { kind: 'error', text: '无权操作其它会话的生成任务。' };
+    const artifactPath = job.artifacts[0]?.path ?? '';
+    const outputRoot = services.outputRoot();
+    const { fenceArtifactPath, revealArtifact } = await import('../task-agent.js');
+    const fenced = await fenceArtifactPath(outputRoot, jobId, artifactPath.split(/[\\/]/).pop() ?? '');
+    if (!fenced) return { kind: 'error', text: '产物路径越界（必须位于 outputDir 内），已拒绝。' };
+    try {
+      const doReveal = services.reveal ?? ((p: string) => revealArtifact(outputRoot, jobId, p.split(/[\\/]/).pop() ?? ''));
+      await doReveal(fenced);
+      return { kind: 'success', text: `已在文件管理器中显示：${fenced}` };
+    } catch (err) {
+      return { kind: 'error', text: `打开目录失败：${err instanceof Error ? err.message : String(err)}` };
     }
   }
   if (arg.startsWith('dl')) {
@@ -399,7 +538,7 @@ export async function runPageCommand(
   }
   return {
     kind: 'error',
-    text: '未知子命令。可用：/synthmedia [status] | json | providers | detect | fetch-models <baseURL> | dl list|start <id>|cancel <id>',
+    text: '未知子命令。可用：/synthmedia [status] | json | providers | detect | jobs [owner] | reveal <jobId> | cancel <jobId> | fetch-models <baseURL> | dl list|start <id>|cancel <id>',
   };
 }
 

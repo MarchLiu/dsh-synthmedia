@@ -14,7 +14,7 @@
  * @module
  */
 import { randomUUID } from 'node:crypto';
-import { mkdir, writeFile, readFile } from 'node:fs/promises';
+import { mkdir, writeFile, readFile, readdir } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import type { Artifact, GenerationRequest, JobRecord, GenerationBackend, JobStatus } from './types.js';
 import type { SynthMediaConfig } from './config.js';
@@ -52,6 +52,8 @@ export interface HostJobRegistry {
 /** Identity the host needs to fence and record one owned job. */
 export interface HostJobOwner {
   readonly owner?: string;
+  /** Ancestor session ids of the owner (nearest parent first). */
+  readonly ancestors?: readonly string[];
   readonly toolCall?: { callId: string; rootCallId: string };
 }
 
@@ -158,11 +160,17 @@ export class JobManager {
       model: req.model,
       modality: req.modality,
       promptPreview: req.prompt.slice(0, 120),
+      ...(Array.isArray(req.images) && req.images.length > 0 ? { frameImages: req.images.map((img) => img.role) } : {}),
       status: 'running',
       progress: 0,
       createdAt: now,
       updatedAt: now,
       artifacts: [],
+      // Sub-task attribution (additive): persisted so the owner survives a
+      // restart and the sidebar can group jobs per agent session.
+      ...(hostOwner?.owner ? { owner: hostOwner.owner } : {}),
+      ...(hostOwner?.ancestors && hostOwner.ancestors.length > 0 ? { ancestors: [...hostOwner.ancestors] } : {}),
+      ...(hostOwner?.toolCall ? { toolCall: hostOwner.toolCall } : {}),
     };
     await mkdir(this.jobDir(id), { recursive: true });
     await this.persist(record);
@@ -338,6 +346,57 @@ export class JobManager {
     } catch {
       return undefined;
     }
+  }
+
+  /**
+   * Sub-task listing for the sidebar tab and /synthmedia jobs: every job
+   * under the output root (in-memory running records first-class, the rest
+   * read from the persisted job.json), running/queued first, then newest
+   * first.
+   *
+   * Two filters exist:
+   * - `owner` — exactly one agent session's jobs (a cybernetics task agent
+   *   passes its own session id and sees exactly its own jobs);
+   * - `session` — the SESSION TREE rooted at that session: jobs it owns plus
+   *   jobs owned by agents it spawned (their `ancestors` contain it). This is
+   *   what the parent conversation's sidebar tab asks for, so a round's task
+   *   agent generation is visible from the conversation that started the
+   *   round. Unowned legacy records never appear under a session filter.
+   */
+  async list(filter?: { owner?: string; session?: string; limit?: number }): Promise<JobRecord[]> {
+    const limit = typeof filter?.limit === 'number' && filter.limit > 0 ? Math.min(filter.limit, 200) : 50;
+    const owner = filter?.owner;
+    const session = filter?.session;
+    const records = new Map<string, JobRecord>();
+    // In-memory running records win over the (possibly staler) disk copies.
+    for (const r of this.running.values()) records.set(r.record.id, r.record);
+    try {
+      const entries = await readdir(this.outputRoot(), { withFileTypes: true });
+      for (const entry of entries) {
+        if (!entry.isDirectory() || records.has(entry.name)) continue;
+        try {
+          const raw = await readFile(join(this.outputRoot(), entry.name, 'job.json'), 'utf8');
+          const parsed = JSON.parse(raw) as JobRecord;
+          if (parsed && typeof parsed.id === 'string' && parsed.id === entry.name) records.set(parsed.id, parsed);
+        } catch { /* unreadable stray directory: skip, never fail the list */ }
+      }
+    } catch { /* output root missing yet: empty list */ }
+    const inSessionTree = (r: JobRecord): boolean => {
+      if (typeof r.owner !== 'string' || r.owner.length === 0) return false;
+      if (r.owner === session) return true;
+      return Array.isArray(r.ancestors) && r.ancestors.includes(session!);
+    };
+    const filtered = [...records.values()]
+      .filter((r) => {
+        if (session !== undefined) return inSessionTree(r);
+        return owner === undefined ? true : r.owner === owner;
+      })
+      .sort((a, b) => {
+        const active = (r: JobRecord) => (r.status === 'running' || r.status === 'queued' ? 0 : 1);
+        if (active(a) !== active(b)) return active(a) - active(b);
+        return a.createdAt < b.createdAt ? 1 : a.createdAt > b.createdAt ? -1 : 0;
+      });
+    return filtered.slice(0, limit);
   }
 
   async wait(id: string, signal?: AbortSignal): Promise<JobRecord> {

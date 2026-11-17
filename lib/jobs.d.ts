@@ -36,6 +36,8 @@ export interface HostJobRegistry {
 /** Identity the host needs to fence and record one owned job. */
 export interface HostJobOwner {
     readonly owner?: string;
+    /** Ancestor session ids of the owner (nearest parent first). */
+    readonly ancestors?: readonly string[];
     readonly toolCall?: {
         callId: string;
         rootCallId: string;
@@ -90,6 +92,26 @@ export declare class JobManager {
     private persist;
     /** In-memory first, then on-disk (survives restarts of the plugin process). */
     get(id: string): Promise<JobRecord | undefined>;
+    /**
+     * Sub-task listing for the sidebar tab and /synthmedia jobs: every job
+     * under the output root (in-memory running records first-class, the rest
+     * read from the persisted job.json), running/queued first, then newest
+     * first.
+     *
+     * Two filters exist:
+     * - `owner` — exactly one agent session's jobs (a cybernetics task agent
+     *   passes its own session id and sees exactly its own jobs);
+     * - `session` — the SESSION TREE rooted at that session: jobs it owns plus
+     *   jobs owned by agents it spawned (their `ancestors` contain it). This is
+     *   what the parent conversation's sidebar tab asks for, so a round's task
+     *   agent generation is visible from the conversation that started the
+     *   round. Unowned legacy records never appear under a session filter.
+     */
+    list(filter?: {
+        owner?: string;
+        session?: string;
+        limit?: number;
+    }): Promise<JobRecord[]>;
     wait(id: string, signal?: AbortSignal): Promise<JobRecord>;
     /**
      * Cancel one job. `signal` (e.g. the calling tool's exec.signal) bounds only

@@ -92,3 +92,5 @@ export { SUPPORTED_ECOSYSTEMS, modelEcosystem, modelGate, profileGate, gateBacke
 export type { MediaEcosystem, EcosystemGate } from './page/ecosystems.js';
 export { detectToolchain } from './page/toolchain.js';
 export type { ToolchainProbes, ToolStatus } from './page/toolchain.js';
+export { fenceArtifactPath, fenceJobDir, planReveal, revealArtifact, artifactContentType, createArtifactRoute, } from './task-agent.js';
+export type { ArtifactRouteDeps } from './task-agent.js';

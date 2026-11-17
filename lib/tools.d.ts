@@ -1,9 +1,3 @@
-/**
- * DSH tool registrations: synthmedia_capabilities / generate / status / wait /
- * cancel. Tool output is canonical structured JSON; every failure path carries
- * sanitized structured errors. No credential values can appear in any output.
- * @module
- */
 import type { JobManager } from './jobs.js';
 import type { ToolStatus } from './page/toolchain.js';
 import type { EcosystemGate } from './page/ecosystems.js';
@@ -16,10 +10,17 @@ interface ToolExec {
     signal: AbortSignal;
     agent?: {
         id?: string;
+        session?: {
+            meta?: {
+                parentSession?: string;
+            };
+        };
     };
     callId?: string;
     rootCallId?: string;
 }
+/** Ancestor resolver supplied by apply() (walks the live agent registry). */
+export type AncestorsOf = (agent: unknown) => readonly string[];
 /**
  * Optional capabilities enrichment (phase-one routing surface). All maps are
  * computed by the CALLER at call time from the live config — this module
@@ -35,6 +36,12 @@ export interface CapabilitiesExtras {
     readonly ecosystem?: Readonly<Record<string, EcosystemGate>>;
     /** Local toolchain statuses for the `tools` section. */
     readonly tools?: () => Promise<readonly ToolStatus[]>;
+    /**
+     * Session-tree resolver: the ancestor session ids of the calling agent
+     * (nearest parent first). apply() supplies it from the live agent registry;
+     * absent, the job records only its direct parentSession.
+     */
+    readonly ancestorsOf?: AncestorsOf;
 }
 export declare function buildSynthMediaTools(jobs: JobManager, extras?: CapabilitiesExtras): Array<{
     name: string;

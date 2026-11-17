@@ -353,8 +353,11 @@ test('apply(): the OPTIONAL jobs service is late-bound through ctx.inject(["jobs
     // more ['jobs'] re-bind (downloads manager) and one ['commands'] (the
     // /synthmedia command). The FIRST pending is still the generation-jobs
     // re-bind, which is what this test exercises.
-    assert.equal(pending.length, 2, 'jobs re-bind + commands registration are the only late bindings');
+    // Sub-task round: a third optional binding ['webServer'] registers the
+    // artifact download route (degrades silently when the host has none).
+    assert.equal(pending.length, 3, 'jobs re-bind + commands + webServer route are the only late bindings');
     assert.deepEqual(pending[0].deps, ['jobs']);
+    assert.deepEqual(pending.map((p) => p.deps[0]).includes('webServer'), true);
     assert.equal(registered.length, 0);
 
     // Bind later, exactly as the host would.

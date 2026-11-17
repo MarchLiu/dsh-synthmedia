@@ -14,6 +14,7 @@
  *
  * @module dsh-synthmedia
  */
+import { randomBytes } from 'node:crypto';
 import { resolveConfig, defaultConfig } from './config.js';
 import { createBackendRegistry } from './backends/index.js';
 import { JobManager, type HostJobRegistry } from './jobs.js';
@@ -25,6 +26,8 @@ import { parseOrder, parseEnabledResources, parseEnabledTools, orderProfiles, re
 import { gateBackends } from './page/ecosystems.js';
 import type { EcosystemGate } from './page/ecosystems.js';
 import { detectToolchain } from './page/toolchain.js';
+import { createArtifactRoute } from './task-agent.js';
+import { createJobsEndpointRoute, jobsTokenInjection } from './jobs-endpoint.js';
 import {
   createPageServices,
   runPageCommand,
@@ -202,7 +205,17 @@ export function apply(ctx: SynthMediaContext, config: Record<string, unknown> = 
   // The page services keep the LIVE config view: buildSnapshot/renderText
   // parse customProfiles per call, so a volatile GUI save is reflected in
   // /synthmedia json + providers output immediately (no rebuild needed).
-  const page: PageServices = createPageServices(live, pageOptions, readService<HostJobRegistry>(ctx, 'jobs'), credentialResolver(ctx));
+  const page: PageServices = createPageServices(
+    live,
+    pageOptions,
+    readService<HostJobRegistry>(ctx, 'jobs'),
+    credentialResolver(ctx),
+    // Sub-task read face + fenced output root for /synthmedia jobs|reveal.
+    // The forwarder proxies onto the CURRENT JobManager, so volatile rebuilds
+    // are observed without re-registration.
+    jobsForward as never,
+    () => jobsForward.outputRoot(),
+  );
   disposers.push(() => page.manager.dispose());
   const adopt = (candidate: unknown): void => {
     hostJobsRef.current = (candidate as HostJobRegistry | undefined) ?? undefined;
@@ -217,22 +230,120 @@ export function apply(ctx: SynthMediaContext, config: Record<string, unknown> = 
     });
   }
 
+  // --- Optional host webserver: artifact download route ---------------------
+  // ctx.webServer (service key 'webServer', @deepseek-ai/dsh-host-webserver)
+  // is OPTIONAL: no route is registered when absent and the sidebar hides
+  // the download action instead (the client learns the fact via the
+  // downloadBase field of /synthmedia jobs). The route streams artifacts
+  // through the task-agent fence (outputDir/dataDir containment, symlink
+  // refusal) with Content-Disposition: attachment.
+  if (typeof ctx.inject === 'function') {
+    ctx.inject(['webServer'], (webCtx: SynthMediaContext) => {
+      // The service lives on the WEBSERVER's ctx, not on the plugin tool ctx
+      // (same seam dsh-client-connection uses); read it from webCtx itself.
+      const webServer = (webCtx as unknown as {
+        webServer?: { register?: (route: unknown) => () => void; getOrigin?: () => string };
+        webserver?: { register?: (route: unknown) => () => void; getOrigin?: () => string };
+      }).webServer
+        ?? (webCtx as unknown as { webserver?: { register?: (route: unknown) => () => void; getOrigin?: () => string } }).webserver
+        ?? readService<{ register?: (route: unknown) => () => void; getOrigin?: () => string }>(webCtx, 'webServer')
+        ?? readService<{ register?: (route: unknown) => () => void; getOrigin?: () => string }>(webCtx, 'webserver');
+      if (!webServer || typeof webServer.register !== 'function') return;
+      let disposer: (() => void) | undefined;
+      try {
+        disposer = webServer.register(createArtifactRoute({ outputRoot: jobsForward.outputRoot() }));
+      } catch { /* route collision or listener not ready: degrade, no download button */ }
+      if (disposer) {
+        disposers.push(() => { try { disposer?.(); } catch { /* idempotent teardown */ } });
+        try {
+          const origin = typeof webServer.getOrigin === 'function' ? webServer.getOrigin() : '';
+          if (typeof origin === 'string' && origin !== '') page.downloadBase = origin.replace(/\/+$/, '') + '/synthmedia/api/artifact';
+        } catch { /* origin not bound yet: the client hides download buttons */ }
+      }
+
+      // --- Token-gated jobs read (sidebar polling without session spam) ------
+      // The tab must NOT poll `/synthmedia jobs` through the command service:
+      // every execute() appends command/run + command/done to the session log,
+      // so a 2 s poll spammed the conversation and grew the log unboundedly.
+      // The read goes over a plain GET gated by a per-activation random token
+      // that this host injects into the served page; the same runPageCommand
+      // path keeps the JSON shape and session-tree scoping identical.
+      try {
+        const jobsToken = randomBytes(16).toString('hex');
+        const offRoute = webServer.register(createJobsEndpointRoute({
+          token: jobsToken,
+          // The command surface passes the arguments WITHOUT the
+          // `/synthmedia` prefix (the framework strips the command name), and
+          // this route must feed the exact same sub-command text.
+          run: (session: string, limit?: number) => runPageCommand(
+            page,
+            typeof limit === 'number' ? `jobs --limit ${limit}` : 'jobs',
+            { caller: session },
+          ),
+        }));
+        disposers.push(() => { try { offRoute(); } catch { /* idempotent teardown */ } });
+        // Hand the token to the served page through the structured index seat
+        // (authenticated boot payload). Absent seat => the client keeps the
+        // command transport as its fallback.
+        const webEmitter = webCtx as unknown as {
+          on?: (name: string, listener: (table: unknown, peer?: unknown) => void) => (() => void) | void;
+        };
+        if (typeof webEmitter.on === 'function') {
+          // The event is emitted on the WEBSERVER's ctx (this webCtx), not on
+          // the plugin tool ctx — dsh-client-connection binds webCtx.on inside
+          // this same inject callback. Binding on the wrong ctx silently
+          // renders no row (observed live: routes live, page had no token).
+          const offInject = webEmitter.on('webserver/index-inject', (table: unknown) => {
+            if (Array.isArray(table)) table.push(jobsTokenInjection(jobsToken));
+          });
+          if (typeof offInject === 'function') {
+            disposers.push(() => { try { offInject(); } catch { /* idempotent teardown */ } });
+          }
+        }
+      } catch { /* route collision or absent seat: keep the command fallback */ }
+    });
+  }
+
   // Capabilities enrichment (phase one): priority ranks, effective-default
   // marks and ecosystem gates are recomputed from the live config whenever it
   // can change — at apply time and on every volatile update — while the
   // `tools` section probes lazily per call. The extras object identity stays
   // stable, so the already-registered tool definitions observe each refresh
   // (tool registration happens once and is never repeated).
+  // Session-tree attribution: walk the live agent registry from the calling
+  // agent to its root (bounded), so a job started by a cybernetics task agent
+  // is ALSO listed by the parent conversation's sidebar tab. The resolver is
+  // tolerant: an absent agent service or a broken chain degrades to "no known
+  // ancestors" (the direct parentSession fallback in tools.ts still applies).
+  const resolveAncestors = (agent: unknown): readonly string[] => {
+    const agents = readService<{ get?: (id: string) => unknown }>(ctx, 'agents');
+    if (!agents || typeof agents.get !== 'function') return [];
+    const chain: string[] = [];
+    let current = agent as { session?: { meta?: { parentSession?: string } } } | undefined;
+    for (let depth = 0; depth < 8; depth += 1) {
+      const parentId = current?.session?.meta?.parentSession;
+      if (typeof parentId !== 'string' || parentId.length === 0 || chain.includes(parentId)) break;
+      chain.push(parentId);
+      let parent: unknown;
+      try { parent = agents.get(parentId); } catch { break; }
+      if (!parent || typeof parent !== 'object') break;
+      current = parent as typeof current;
+    }
+    return chain;
+  };
+
   const capsExtras: {
     priority?: Record<string, number>;
     effectiveDefault?: Set<string>;
     ecosystem?: Record<string, EcosystemGate>;
     tools?: () => ReturnType<typeof detectToolchain>;
+    ancestorsOf?: (agent: unknown) => readonly string[];
   } = {
     tools: async () => {
       const { tools: enabled } = parseEnabledTools(live['enabledTools']);
       return detectToolchain(enabled);
     },
+    ancestorsOf: resolveAncestors,
   };
   const refreshCapabilitiesExtras = (): void => {
     const { order } = parseOrder(live['providerOrder']);
@@ -295,10 +406,14 @@ export function apply(ctx: SynthMediaContext, config: Record<string, unknown> = 
     const registry = (commandCtx as { commands?: { register: (d: unknown) => () => void } })?.commands;
     if (!registry || typeof registry.register !== 'function') return;
     let commandDisposer: (() => void) | undefined;
-    const handler = (invocation: { rawInput?: string }) => {
+    const handler = (invocation: { rawInput?: string; agent?: { id?: string } }) => {
       const rawInput = typeof invocation?.rawInput === 'string' ? invocation.rawInput : '';
+      // The invoking agent is the session-scoping authority for the sub-task
+      // commands: /synthmedia jobs defaults to this session's tree and never
+      // lists another conversation's jobs.
+      const caller = typeof invocation?.agent?.id === 'string' && invocation.agent.id.length > 0 ? invocation.agent.id : undefined;
       // Promise result: the command contract serializes the awaited value.
-      return runPageCommand(page, rawInput).then((answer) => {
+      return runPageCommand(page, rawInput, caller !== undefined ? { caller } : undefined).then((answer) => {
         if (answer.kind === 'error') return { kind: 'error' as const, text: answer.text };
         return { kind: 'success' as const, text: answer.text, ...(answer.json !== undefined ? { json: answer.json } : {}) };
       });
@@ -307,7 +422,7 @@ export function apply(ctx: SynthMediaContext, config: Record<string, unknown> = 
       commandDisposer = registry.register({
         name: 'synthmedia',
         description: 'SynthMedia 配置页：profiles 一览 / DSH providers 导入数据 / 系统检测 / 离线模型下载',
-        input: { hint: '[status|json|providers|detect|fetch-models <baseURL>|dl list|dl start <id>|dl cancel <id>]' },
+        input: { hint: '[status|json|providers|detect|jobs [owner]|reveal <jobId>|fetch-models <baseURL>|dl list|dl start <id>|dl cancel <id>]' },
         handler,
       });
     } catch {
@@ -385,3 +500,7 @@ export { SUPPORTED_ECOSYSTEMS, modelEcosystem, modelGate, profileGate, gateBacke
 export type { MediaEcosystem, EcosystemGate } from './page/ecosystems.js';
 export { detectToolchain } from './page/toolchain.js';
 export type { ToolchainProbes, ToolStatus } from './page/toolchain.js';
+export {
+  fenceArtifactPath, fenceJobDir, planReveal, revealArtifact, artifactContentType, createArtifactRoute,
+} from './task-agent.js';
+export type { ArtifactRouteDeps } from './task-agent.js';

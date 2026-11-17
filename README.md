@@ -591,6 +591,193 @@ Probes: `os.cpus/totalmem/arch/platform`、目标目录 `fs.statfs`、darwin
 | `SYNTHMEDIA_ZGCI_LEDGER` / `SYNTHMEDIA_ZGCI_OUT_DIR` | validation-script ledger and artifact paths (defaults under the output root; used to test the guard with throwaway fixtures) |
 | `SYNTHMEDIA_ZGCI_POLL_MS` | validation-script poll cadence override (default 15 s; tests use a short value) |
 
+## Sub-tasks, sidebar tab & artifact operations (v0.2 round)
+
+### Generation jobs as observable sub-tasks
+
+Every `synthmedia_generate` is an observable child task of the calling agent
+without blocking it:
+
+- the `JobRecord` itself now carries additive `owner` (the calling agent
+  session id, `exec.agent.id`), `ancestors` (its parent-session chain) and
+  `toolCall` (`callId`/`rootCallId`) fields, persisted in `job.json` —
+  attribution survives restarts;
+- the host Jobs registry face stays the UI face (`kind: 'synthmedia'`,
+  `owner`, cancel hook, progress), and `JobManager.list({ owner? | session?,
+  limit? })` is the read face: running/queued first, then newest-first.
+  `owner` returns exactly one agent's jobs; `session` returns the session
+  TREE — that session's own jobs plus every job whose `ancestors` contain it
+  (the agents it spawned). A record without `owner` (legacy) is never listed
+  under a session filter;
+- seam decision: `ctx.subagents` (`@deepseek-ai/dsh-subagent`,
+  `SubagentProvider.startActivation`) models **LLM child agents** — its
+  `SubagentStartRequest` requires a live `parent: Agent` object, a
+  `prompt: ContentBlock[]` and a registered backend, and its lifecycle is
+  published via `subagent/start` / `subagent/end` events. A media job is not
+  an LLM conversation, so the plugin does NOT spoof a subagent activation and
+  emits no synthetic events; the compliant representation is the jobs
+  owner-attribution above.
+- **cybernetics compatibility**: no patch to dsh-cybernetics is needed. A
+  cybernetics task/verify/triage agent that calls `synthmedia_generate` has
+  its own session id, so `exec.agent.id` — and therefore `job.owner` — is the
+  child session, while `apply()` walks the live `ctx.agents` registry through
+  `agent.session.meta.parentSession` to record the ancestor chain. The parent
+  conversation's `/synthmedia jobs` therefore lists the round's generation as
+  `/synthmedia jobs` in the parent — the listed `owner` is the child session
+  id visible in the session tree.
+- the parent agent is never blocked: `synthmedia_generate` returns
+  immediately; waiting is an explicit `synthmedia_wait` (or the sidebar tab).
+
+### Sidebar tab (better-sidebar, optional)
+
+When `dsh-better-sidebar` is installed, the plugin registers a
+`synthmedia:jobs` tab (+ menu, `single: true`, order 60, zh/en title via
+locale) showing the current session's generation jobs: status badge,
+backend/model/modality, progress bar, elapsed time, error and the artifact
+list. Auto-refresh (2 s) runs ONLY while the tab is visible, and ONLY over the
+token-gated endpoint below; hidden tabs stop refreshing. The command transport
+is never put on a timer (see "Session-event hygiene"). Clicking a file name (or the menu's「在 Sidebar 预览」) opens it in
+the sidebar editor through `TabComponentProps.onOpenFile`.
+
+**Degradation**: `betterSidebar` is never in the client's top-level `inject`
+list (an absent service would stall the whole client entry). It is read via
+`ctx.get('betterSidebar')` / `ctx.inject(['betterSidebar'], …)` plus a short
+retry; without the service everything else (settings cards, conversation
+view) keeps working, and the conversation「媒体服务」view carries the same
+jobs panel as the fallback entry (preview degrades to copy-path + notice).
+
+**Native「新页签」guide scroll shim**: DSH's native right-Sidebar tab body is
+`overflow:hidden`, and the new-tab guide is `min-height:100%` with
+`justify-content:center`. Once the registered tab types are taller than the
+pane, the list overflows BOTH ends — the top entries are clipped and there is
+no scroll container, so they cannot be reached. Any plugin tab (ours
+included) adds a row, so the plugin injects one scoped rule while active
+(`[class*="_tabBody"] [class*="_guide"]{justify-content:flex-start;
+overflow-y:auto;max-height:100%}`), skips it when an identical tag is already
+present (client reload / HMR), and removes it with the fiber. Verified by a
+standalone reproduction of the native CSS: without the rule the first entries
+are cut off and the list cannot scroll; with it the list starts at the top and
+scrolls. The condition "center when it fits, start when it overflows" is what
+`justify-content: safe center` is for, but Chromium parses that declaration and
+still renders unsafely in flexbox (probed: `CSS.supports()` is true while the
+rendered list stays top-clipped), so the rule pins `flex-start` — the only
+cost is that a short list is top-aligned instead of vertically centred. The
+real fix belongs upstream (the guide body should scroll from `flex-start`).
+
+**Session-event hygiene**: the host command service appends
+`command/run` + `command/done` session events for EVERY execution, and the GUI
+renders them as transcript lines. Polling `/synthmedia jobs` through
+`remote.commands.execute` therefore printed a duplicate
+`>_ synthmedia · 当前没有生成任务。` line on every tick and grew the session log
+without bound. Auto-refresh now goes through the token endpoint (no session
+events); the command transport is used only on demand — mount, tab re-shown,
+artifact reveal/cancel (one click, one event) and the panel's「刷新」
+(`jobs.refresh`) button.
+
+**Older host, same page**: a host that predates the endpoint answers 404, so
+the panel falls back to the command transport on the first failure (also 403,
+also a thrown fetch) for that mount — one read, no timer, list still renders.
+The `--limit` flag is only sent when the user pages the history, so the plain
+list stays compatible with an older host; `--limit` parsing and the paged view
+take effect after the host restart (an older host rejects the flag, which is
+why the default list never sends it).
+
+History is never pruned: completed jobs keep their record (`job.json`) and
+artifacts, the panel lists running jobs first and then the newest finished
+ones, and「加载更早的任务」(`jobs.more`) doubles the page size 50 → 200.
+
+A host restart mints a NEW page token, so a page left open keeps a stale one
+and the endpoint answers 403. The panel notices that status, degrades to the
+command transport for the rest of that mount (one read, no timer), and fetches
+again on the next mount after a reload — no死循环, no error stuck on screen.
+
+**Command transport**: better-sidebar renders the tab inside its OWN client
+fiber, whose `inject` list has no `remote.commands` namespace — reading
+`props.ctx.remote.commands` there is undefined, which used to leave the panel
+on「加载中…」forever. The plugin therefore captures its own
+`ctx.remote.commands.execute` at activation and hands it to the component
+through the descriptor closure; a missing transport now renders an explicit
+note, and every `/synthmedia jobs` read is bounded by a 12 s timeout so the
+panel can never hang silently.
+
+### Artifact operations (popup menu, right-click or「⋯」)
+
+- **Download**: the optional host webserver (`ctx.webServer`, late-bound with
+  `ctx.inject(['webServer'], …)`) serves
+  `GET /synthmedia/api/artifact/<jobId>/<file>` — streamed bytes,
+  `Content-Disposition: attachment`, correct Content-Type. Every path passes
+  the fence (`fenceArtifactPath`): strict job-id/file-name patterns, output
+  root containment, and a **realpath** check that refuses symlink escapes;
+  violations are 404s. The job LIST has its own route
+  (`GET /synthmedia/api/jobs`) that is **token-gated**: the host mints a
+  random per-activation token, injects it into the served page through the
+  `webserver/index-inject` seat (`globalThis.__SYNTHMEDIA_JOBS_TOKEN__`), and
+  compares it with `timingSafeEqual`. It answers from the same
+  `runPageCommand` path as `/synthmedia jobs` (same JSON, same session-tree
+  scoping, same `downloadBase`), is read-only, and never writes a session
+  event. When no webserver is present the client hides the download action
+  (`downloadBase` absent from `/synthmedia jobs`).
+- **Copy paths**: relative path against the session cwd (`scope.cwd`),
+  absolute path as-is; `navigator.clipboard` with a textarea fallback, and a
+  visible note on failure.
+- **Open containing folder**: `/synthmedia reveal <jobId>` — fenced to the
+  output root, then `open -R` (darwin) / `explorer /select,` (win32) /
+  `xdg-open <dir>` (linux), spawned argv-only, `shell: false`.
+- **Cancel from the UI**: `/synthmedia cancel <jobId>` performs the same
+  cooperative cancellation as the `synthmedia_cancel` tool.
+
+### Frame conditioning (first/last frame images, additive)
+
+`synthmedia_generate` accepts optional `firstFrame` / `lastFrame` — absolute
+file paths to jpg/png/webp images (≤ 8 MB each, format verified by magic
+bytes, inlined as data URIs; the bytes are never persisted or logged, the job
+record only keeps the roles). Video backends built on the MiniMax V2 video
+protocol (`minimax-video-compatible`: the zgci hub H3 AND the MiniMax official
+preset) splice them into the multimodal `content` array as
+`{type:'image_url', image_url:{url}, role:'first_frame'|'last_frame'}`, and an
+image-led request omits `ratio` (the API derives it from the first frame).
+Other protocols ignore frames (Ark seedance has its own frames script; task-api
+rejects unknown fields). A 0/1/2-image request maps to the documented
+text-to-video / first-frame / last-frame / first-last modes.
+
+### New commands### New commands
+
+```
+/synthmedia jobs [--limit N] [owner]
+                             # caller-session-tree list (JSON payload; running first)
+                             # --limit ∈ 1..200 (default 50, never pruned)
+/synthmedia reveal <jobId>   # open the artifact's folder in the file manager
+/synthmedia cancel <jobId>   # cancel one running job
+```
+
+`jobs`, `reveal` and `cancel` are session-scoped: the invoking agent (the
+command contract's `invocation.agent`) is the authority, the parent session
+sees its spawn tree, and an explicit `jobs <owner>` is honored only for the
+caller itself. Another conversation's owner, job id or artifact is refused —
+the generation of a cybernetics task agent is visible to the round's parent
+conversation, never to unrelated sessions.
+
+### Manual verification (needs a running host + browser refresh)
+
+1. Restart the host (the profile symlink already points at this repo) and
+   hard-refresh the Web GUI.
+2. Open the sidebar「+」menu →「生成任务」tab appears; empty state explains
+   how to start a job.
+3. In a session, run `synthmedia_generate` (an offline/mock profile keeps
+   this cost-free), then check: progress bar advances, cancel works, artifact
+   click opens the sidebar editor,「⋯」menu actions behave (download via
+   `http://127.0.0.1:<port>/synthmedia/api/artifact/…`).
+4. Switch to another tab / close the sidebar and confirm (DevTools network)
+   that `/synthmedia jobs` polling stops while hidden.
+5. Uninstall/disable better-sidebar, restart: settings cards and the
+   conversation「媒体服务」view must still work with the jobs panel present.
+6. cybernetics attribution: run a goal round whose task agent generates an
+   image on an offline profile; `/synthmedia jobs` in the parent shows the
+   child session id as `owner` and `ancestors` containing the parent, while
+   another conversation's `/synthmedia jobs` does not list it at all.
+7. HMR/reload: reload the Web GUI with the plugin active — the tab registers
+   once (no duplicate-id error), and closing the tab stops the polling.
+
 ## Tools
 
 ```

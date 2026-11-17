@@ -77,6 +77,23 @@ export declare function loadProviders(patchPath?: string): {
     providers: readonly DshProviderEntry[];
     error?: string;
 };
+/** Minimal structural face of the JobManager the page commands use. */
+export interface PageJobs {
+    get(id: string): Promise<{
+        id: string;
+        artifacts: ReadonlyArray<{
+            path: string;
+        }>;
+        owner?: string;
+        ancestors?: readonly string[];
+    } | undefined>;
+    list(filter?: {
+        owner?: string;
+        session?: string;
+        limit?: number;
+    }): Promise<Array<Record<string, unknown>>>;
+    cancel(id: string): Promise<Record<string, unknown>>;
+}
 /** Services the page command handlers run against. */
 export interface PageServices {
     readonly manager: DownloadManager;
@@ -91,8 +108,19 @@ export interface PageServices {
     readonly detectTools?: (enabled: readonly ToolName[]) => Promise<readonly ToolStatus[]>;
     /** Optional system-report collector (tests inject a stub; defaults to real probes). */
     readonly collectReport?: (dir: string) => Promise<SystemReport>;
+    /** Optional JobManager face for `/synthmedia jobs` + `reveal`. */
+    readonly jobs?: PageJobs;
+    /** Absolute output root for the reveal fence (resolve(outputDir)). */
+    readonly outputRoot?: () => string;
+    /**
+     * Reveal implementation (defaults to task-agent.revealArtifact with
+     * process.platform). Tests inject a spy — never spawn in tests.
+     */
+    readonly reveal?: (filePath: string) => Promise<void>;
+    /** Origin-absolute download route base when the host webserver is present. */
+    downloadBase?: string;
 }
-export declare function createPageServices(config: Record<string, unknown>, options: PageOptions, hostJobs?: unknown, resolveCredential?: (name: string) => Promise<string | undefined>): PageServices;
+export declare function createPageServices(config: Record<string, unknown>, options: PageOptions, hostJobs?: unknown, resolveCredential?: (name: string) => Promise<string | undefined>, jobs?: PageJobs, outputRoot?: () => string): PageServices;
 export declare function pageDetect(services: PageServices): Promise<{
     report: SystemReport;
     assessment: H3Assessment;
@@ -103,7 +131,9 @@ export declare function renderText(services: PageServices, providers: readonly D
  * `/synthmedia` subcommand execution. Returns { kind, text, json? } where
  * `json` carries the machine-readable payload the client tab renders.
  */
-export declare function runPageCommand(services: PageServices, rawInput: string): Promise<{
+export declare function runPageCommand(services: PageServices, rawInput: string, opts?: {
+    caller?: string;
+}): Promise<{
     kind: 'success' | 'error';
     text: string;
     json?: unknown;

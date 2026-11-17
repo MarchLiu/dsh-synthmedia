@@ -5,12 +5,20 @@
 /** Generation modality. */
 export type Modality = 'video' | 'text' | 'image' | 'audio';
 /** A normalized generation request handed to a backend. */
+/** One conditioned frame (additive, optional). `dataUri` is a small inlined image. */
+export interface FrameImage {
+    readonly role: 'first_frame' | 'last_frame';
+    /** `data:image/jpeg;base64,…` or an https URL; never a local path on the wire. */
+    readonly dataUri: string;
+}
 export interface GenerationRequest {
     readonly backend: string;
     readonly model: string;
     readonly modality: Modality;
     readonly prompt: string;
     readonly negativePrompt?: string;
+    /** Optional first/last frame conditioning (video backends that accept images). */
+    readonly images?: readonly FrameImage[];
     /** Seconds (video) clamped by the backend to its supported range. */
     readonly durationSeconds?: number;
     /** "WxH" or "W*H"; backends map to their supported sizes. */
@@ -34,6 +42,8 @@ export interface JobRecord {
     readonly model: string;
     readonly modality: Modality;
     readonly promptPreview: string;
+    /** Additive: roles of conditioned frames, e.g. ['first_frame','last_frame']. */
+    readonly frameImages?: readonly string[];
     status: JobStatus;
     progress: number;
     createdAt: string;
@@ -55,6 +65,24 @@ export interface JobRecord {
     remoteId?: string;
     artifacts: Artifact[];
     error?: SanitizedError;
+    /**
+     * Owning agent session id (the "task agent" attribution): the host jobs
+     * registry fences access by it and the sidebar groups per session. Absent
+     * on legacy records — additive field, always optional.
+     */
+    owner?: string;
+    /**
+     * Ancestor agent session ids of the owner, nearest parent first. Lets a
+     * parent session's sidebar list the generation jobs of the task agents it
+     * spawned (the session tree) without a separate child registry. Absent on
+     * legacy records and on root agents.
+     */
+    ancestors?: string[];
+    /** Durable creating tool invocation (callId + rootCallId of the parent). */
+    toolCall?: {
+        callId: string;
+        rootCallId: string;
+    };
 }
 /** Structured, secret-free error payload. */
 export interface SanitizedError {

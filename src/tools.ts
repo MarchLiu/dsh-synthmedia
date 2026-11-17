@@ -4,8 +4,9 @@
  * sanitized structured errors. No credential values can appear in any output.
  * @module
  */
+import type { FrameImage } from './types.js';
 import type { HostJobOwner, JobManager } from './jobs.js';
-import { SynthError, sanitizeUnknown } from './errors.js';
+import { SynthError, sanitizeText, sanitizeUnknown } from './errors.js';
 import type { ToolStatus } from './page/toolchain.js';
 import type { EcosystemGate } from './page/ecosystems.js';
 
@@ -16,21 +17,39 @@ import type { EcosystemGate } from './page/ecosystems.js';
  */
 interface ToolExec {
   signal: AbortSignal;
-  agent?: { id?: string };
+  agent?: { id?: string; session?: { meta?: { parentSession?: string } } };
   callId?: string;
   rootCallId?: string;
 }
 
+/** Ancestor resolver supplied by apply() (walks the live agent registry). */
+export type AncestorsOf = (agent: unknown) => readonly string[];
+
 /** Owner identity handed to the host jobs registry (only when truly known). */
-function hostOwnerOf(exec: ToolExec | undefined): HostJobOwner | undefined {
+function hostOwnerOf(exec: ToolExec | undefined, ancestorsOf?: AncestorsOf): HostJobOwner | undefined {
   const owner = typeof exec?.agent?.id === 'string' && exec.agent.id.length > 0 ? exec.agent.id : undefined;
   const callId = typeof exec?.callId === 'string' && exec.callId.length > 0 ? exec.callId : undefined;
   const rootCallId = typeof exec?.rootCallId === 'string' && exec.rootCallId.length > 0
     ? exec.rootCallId
     : callId;
   if (!owner && !callId) return undefined;
+  // The session tree: the parent chain of the calling agent. Without the
+  // resolver the one-level parentSession recorded on the session is still
+  // enough to attribute the job to its direct parent.
+  let ancestors: readonly string[] = [];
+  try {
+    const resolved = ancestorsOf ? ancestorsOf(exec?.agent) : [];
+    ancestors = Array.isArray(resolved) ? resolved : [];
+  } catch {
+    ancestors = [];
+  }
+  if (ancestors.length === 0 && owner) {
+    const parent = exec?.agent?.session?.meta?.parentSession;
+    if (typeof parent === 'string' && parent.length > 0 && parent !== owner) ancestors = [parent];
+  }
   return {
     ...(owner ? { owner } : {}),
+    ...(ancestors.length > 0 ? { ancestors: [...ancestors] } : {}),
     ...(callId ? { toolCall: { callId, rootCallId: rootCallId! } } : {}),
   };
 }
@@ -112,6 +131,12 @@ export interface CapabilitiesExtras {
   readonly ecosystem?: Readonly<Record<string, EcosystemGate>>;
   /** Local toolchain statuses for the `tools` section. */
   readonly tools?: () => Promise<readonly ToolStatus[]>;
+  /**
+   * Session-tree resolver: the ancestor session ids of the calling agent
+   * (nearest parent first). apply() supplies it from the live agent registry;
+   * absent, the job records only its direct parentSession.
+   */
+  readonly ancestorsOf?: AncestorsOf;
 }
 
 export function buildSynthMediaTools(
@@ -125,6 +150,38 @@ export function buildSynthMediaTools(
   execute: (args: unknown, exec: ToolExec) => Promise<unknown>;
 }> {
   const asArgs = (raw: unknown): Record<string, unknown> => (raw ?? {}) as Record<string, unknown>;
+
+const FRAME_MAX_BYTES = 8 * 1024 * 1024;
+const frameMimeByMagic = (b: Buffer): string | undefined => {
+  if (b.length >= 3 && b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return 'image/jpeg';
+  if (b.length >= 8 && b.subarray(0, 8).toString('hex') === '89504e470d0a1a0a') return 'image/png';
+  if (b.length >= 12 && b.subarray(0, 4).toString('ascii') === 'RIFF' && b.subarray(8, 12).toString('ascii') === 'WEBP') return 'image/webp';
+  return undefined;
+};
+/** Read one optional frame path into a data URI; throws structured errors. */
+async function readFrameImage(role: 'first_frame' | 'last_frame', raw: unknown): Promise<FrameImage | undefined> {
+  if (raw === undefined || raw === null || raw === '') return undefined;
+  if (typeof raw !== 'string' || raw.length === 0) {
+    throw new SynthError('E_REQUEST', `${role} must be a file path string`, 'router');
+  }
+  const { readFile, stat } = await import('node:fs/promises');
+  const { resolve } = await import('node:path');
+  const path = resolve(raw);
+  const st = await stat(path).catch(() => { throw new SynthError('E_REQUEST', `${role}: file not readable: ${sanitizeText(raw)}`, 'router'); });
+  if (!st.isFile()) throw new SynthError('E_REQUEST', `${role}: not a regular file: ${sanitizeText(raw)}`, 'router');
+  if (st.size > FRAME_MAX_BYTES) throw new SynthError('E_REQUEST', `${role}: image exceeds 8 MB (${st.size} bytes)`, 'router');
+  const bytes = await readFile(path);
+  const mime = frameMimeByMagic(bytes);
+  if (!mime) throw new SynthError('E_REQUEST', `${role}: unsupported image format (need jpg/png/webp, checked by magic bytes)`, 'router');
+  return { role, dataUri: `data:${mime};base64,${bytes.toString('base64')}` };
+}
+async function readFrameImages(first: unknown, last: unknown): Promise<FrameImage[] | undefined> {
+  const images = [
+    await readFrameImage('first_frame', first),
+    await readFrameImage('last_frame', last),
+  ].filter((x): x is FrameImage => x !== undefined);
+  return images.length > 0 ? images : undefined;
+}
 
   return [
     {
@@ -190,6 +247,8 @@ export function buildSynthMediaTools(
           durationSeconds: { type: 'number', description: 'video duration in seconds (clamped by backend)' },
           size: strSchema('video size "WxH", e.g. 1280x720'),
           seed: { type: 'number', description: 'random seed for reproducibility' },
+          firstFrame: strSchema('optional first-frame image: absolute file path (jpg/png/webp, <=8 MB); inlined as a data URI; video backends only'),
+          lastFrame: strSchema('optional last-frame image: absolute file path (jpg/png/webp, <=8 MB); inlined as a data URI; video backends only'),
         },
         required: ['backend', 'model', 'modality', 'prompt'],
       },
@@ -206,7 +265,8 @@ export function buildSynthMediaTools(
             durationSeconds: a['durationSeconds'] as number | undefined,
             size: a['size'] as string | undefined,
             seed: a['seed'] as number | undefined,
-          }, hostOwnerOf(exec));
+            images: await readFrameImages(a['firstFrame'], a['lastFrame']),
+          }, hostOwnerOf(exec, extras?.ancestorsOf));
           exec.signal.addEventListener('abort', () => { void jobs.cancel(record.id); }, { once: true });
           return { job: record };
         });

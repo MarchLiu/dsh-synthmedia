@@ -44,7 +44,7 @@
  * separate metadata and never gates anything by itself.
  * @module
  */
-import type { BackendPoll, GenerationBackend, GenerationRequest } from '../types.js';
+import type { BackendPoll, FrameImage, GenerationBackend, GenerationRequest } from '../types.js';
 import type { BackendConfig } from '../config.js';
 import { SynthError, sanitizeText } from '../errors.js';
 import {
@@ -395,13 +395,25 @@ export function createMinimaxBackend(cfg: BackendConfig, resolve: CredentialReso
       const ratio = sizeRatio ?? resolveRatio(req);
 
       // Documented V2 body: multimodal `content` array + resolution/duration/ratio.
+      // Frame conditioning (additive): `role:first_frame|last_frame` images ride
+      // the same content array; with images present `ratio` must be omitted —
+      // the API derives the output ratio from the first frame (observed on
+      // seedance; MiniMax V2 documents the same image-led behavior).
+      const frameImages = (req.images ?? []).filter(
+        (img): img is FrameImage => typeof img?.dataUri === 'string' && img.dataUri.startsWith('data:image/')
+          || (typeof img?.dataUri === 'string' && img.dataUri.startsWith('https://')),
+      );
+      const content: Array<Record<string, unknown>> = [{ type: 'text', text: req.prompt }];
+      for (const img of frameImages) {
+        content.push({ type: 'image_url', image_url: { url: img.dataUri }, role: img.role });
+      }
       const payload: Record<string, unknown> = {
         ...extra,
         model: req.model,
-        content: [{ type: 'text', text: req.prompt }],
+        content,
         resolution,
         duration,
-        ratio,
+        ...(frameImages.length > 0 ? {} : { ratio }),
       };
       // Only DOCUMENTED V2 fields are set here. `seed` / `negative_prompt` are
       // not part of the V2 create schema, so they are never invented on the

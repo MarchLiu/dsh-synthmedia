@@ -8,3 +8,7 @@ synthmedia-data/
 *.log
 .DS_Store
 cordis.patch.yml.bak*
+h3-job/
+h3-boat/
+outputs/
+designs/
