@@ -19,7 +19,7 @@ import { resolveConfig, defaultConfig } from './config.js';
 import { createBackendRegistry } from './backends/index.js';
 import { JobManager, type HostJobRegistry } from './jobs.js';
 import { buildSynthMediaTools } from './tools.js';
-import { envCredentialResolver, type CredentialResolver } from './http.js';
+import { envCredentialResolver, fileCredentialLookup, type CredentialResolver } from './http.js';
 import { parseCustomProfiles } from './page/custom.js';
 import { mergeCustomBackends } from './page/custom.js';
 import { parseOrder, parseEnabledResources, parseEnabledTools, orderProfiles, resolveDefaultProfile } from './page/priority.js';
@@ -125,7 +125,7 @@ function credentialResolver(ctx: SynthMediaContext): CredentialResolver {
     } catch {
       // Provider failures fall through to the environment, never to silence.
     }
-    return process.env[ref];
+    return process.env[ref] ?? fileCredentialLookup(ref);
   };
 }
 

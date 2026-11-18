@@ -332,6 +332,10 @@ test('minimax-official: missing credential fails BEFORE any network call', async
   });
   const base = await listen(server);
   delete process.env.MINIMAX_API_KEY;
+  // Hermetic resolver: disable the credential-file fallback (real user YAML
+  // would satisfy the lookup and break the fail-before-network contract).
+  const prevFallback = process.env.SYNTHMEDIA_CREDENTIAL_FILE_FALLBACK;
+  process.env.SYNTHMEDIA_CREDENTIAL_FILE_FALLBACK = '0';
   try {
     const { resolveConfig } = await import('../lib/config.js');
     const { createBackendRegistry } = await import('../lib/backends/index.js');
@@ -349,6 +353,8 @@ test('minimax-official: missing credential fails BEFORE any network call', async
     assert.equal(requests, 0, 'no byte may reach the network without a credential');
   } finally {
     server.close();
+    if (prevFallback === undefined) delete process.env.SYNTHMEDIA_CREDENTIAL_FILE_FALLBACK;
+    else process.env.SYNTHMEDIA_CREDENTIAL_FILE_FALLBACK = prevFallback;
   }
 });
 

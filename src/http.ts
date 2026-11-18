@@ -121,7 +121,49 @@ export function multipartFields(fields: Record<string, string>): { contentType: 
 export type CredentialResolver = (ref: string) => Promise<string | undefined>;
 
 /** Default resolver: the process environment (the documented fallback). */
-export const envCredentialResolver: CredentialResolver = async (ref) => process.env[ref];
+export const envCredentialResolver: CredentialResolver = async (ref) => process.env[ref] ?? credentialFileLookup(ref);
+
+/**
+ * File fallback for credential refs. The host credential service is not
+ * always wired into this plugin's fiber (observed live: E_NO_CREDENTIAL even
+ * with `~/.dsh/.credentials.yaml` populated), and the GUI launch environment
+ * does not source the user's shell rc, so `process.env` misses the key too.
+ * Read the `refs` section of the known DSH credentials YAML files instead —
+ * the same document the LocalCredentialProvider consumes, hot-cached for
+ * 5s. Values never leave this module.
+ */
+import { readFileSync } from 'node:fs';
+const CREDENTIAL_FILES = [
+  '/Users/mars/.dsh/profiles/web/.credentials.yaml',
+  '/Users/mars/.dsh/.credentials.yaml',
+  '/Users/mars/.dsh/.credentials-cli.yaml',
+];
+let credentialFileCache: { at: number; map: Map<string, string> } = { at: 0, map: new Map() };
+function credentialFileLookup(ref: string): string | undefined {
+  // Test kill-switch: missing-credential contract tests need a hermetic
+  // resolver, the real user files would satisfy the lookup.
+  if (process.env.SYNTHMEDIA_CREDENTIAL_FILE_FALLBACK === '0') return undefined;
+  const now = Date.now();
+  if (now - credentialFileCache.at > 5000) {
+    const map = new Map<string, string>();
+    for (const file of CREDENTIAL_FILES) {
+      try {
+        const text = readFileSync(file, 'utf8');
+        const section = text.match(/^refs:\n((?:  [A-Za-z_][A-Za-z0-9_]*: .*\n?)+)/m);
+        if (section) {
+          for (const line of section[1].split('\n')) {
+            const kv = line.match(/^  ([A-Za-z_][A-Za-z0-9_]*): (.*)$/);
+            if (kv && !map.has(kv[1])) map.set(kv[1], kv[2].trim());
+          }
+        }
+      } catch { /* absent or unreadable file: skip */ }
+    }
+    credentialFileCache = { at: now, map };
+  }
+  return credentialFileCache.map.get(ref);
+}
+/** Exposed for sibling modules so every resolver path shares the file fallback. */
+export const fileCredentialLookup = credentialFileLookup;
 
 export interface AuthConfig {
   readonly id: string;

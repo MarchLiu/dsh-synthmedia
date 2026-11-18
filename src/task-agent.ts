@@ -187,9 +187,12 @@ export function createArtifactRoute(deps: ArtifactRouteDeps): {
           return;
         }
         const contentType = artifactContentType(m[2]!);
+        // Inline rendering for in-panel preview: the browser plays mp4/png
+        // natively; `attachment` would force a save dialog.
+        const inline = url.searchParams.get('disposition') === 'inline';
         res.writeHead(200, {
           'Content-Type': contentType,
-          'Content-Disposition': `attachment; filename="${m[2]}"`,
+          'Content-Disposition': `${inline ? 'inline' : 'attachment'}; filename="${m[2]}"`,
           'Cache-Control': 'no-store',
         });
         const stream = createReadStream(path);

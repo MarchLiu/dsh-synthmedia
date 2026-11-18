@@ -39,6 +39,9 @@ export declare function multipartFields(fields: Record<string, string>): {
 export type CredentialResolver = (ref: string) => Promise<string | undefined>;
 /** Default resolver: the process environment (the documented fallback). */
 export declare const envCredentialResolver: CredentialResolver;
+declare function credentialFileLookup(ref: string): string | undefined;
+/** Exposed for sibling modules so every resolver path shares the file fallback. */
+export declare const fileCredentialLookup: typeof credentialFileLookup;
 export interface AuthConfig {
     readonly id: string;
     readonly authStyle: 'bearer' | 'basic' | 'raw' | 'none';
@@ -55,3 +58,4 @@ export interface AuthConfig {
  * value never leaves this function.
  */
 export declare function authHeaders(cfg: AuthConfig, resolve: CredentialResolver): Promise<Record<string, string>>;
+export {};

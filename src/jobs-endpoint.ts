@@ -107,6 +107,14 @@ export function createJobsEndpointRoute(deps: JobsEndpointDeps): {
         const rawLimit = Number(url.searchParams.get('limit'));
         const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(Math.floor(rawLimit), 200) : undefined;
         const answer = await deps.run(session, limit);
+        // DEBUG: trace panel requests to pinpoint the empty-list bug.
+        try {
+          const { appendFileSync } = await import('node:fs');
+          const jobsJson = answer.json as { jobs?: unknown[] } | undefined;
+          const count = answer.kind === 'success' && jobsJson && Array.isArray(jobsJson.jobs) ? jobsJson.jobs.length : -1;
+          appendFileSync('/Users/mars/jobs/dsh-synthmedia/jobs-endpoint-debug.log',
+            `[${new Date().toISOString()}] session=${session} limit=${limit} kind=${answer.kind} jobs=${count}${answer.kind !== 'success' ? ' text=' + answer.text : ''}\n`);
+        } catch { /* debug logging must never break the endpoint */ }
         if (answer.kind !== 'success') {
           replyJson(res, 500, { error: { code: 'E_JOBS', message: answer.text } });
           return;

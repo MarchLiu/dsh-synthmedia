@@ -1326,9 +1326,60 @@ window.__ModuleLoader__.load({
 		 * the preview action; without it the action degrades to copy-path + notice.
 		 */
 		function JobsPanel(props) {
+		/**
+		 * Text fallback parser for the jobs list. The session command transport
+		 * (`remote.commands.execute`) carries only `{kind, text}` — its result
+		 * schema has NO `json` field — so when the panel degrades from the
+		 * token endpoint to the command transport, `result.json` is always
+		 * absent and the old code rendered an EMPTY list even though the
+		 * server had found jobs. Parse the command's text output back into job
+		 * objects instead; the text lists exactly the session-tree scope the
+		 * server filtered (own jobs + spawned agents, completed included).
+		 */
+		function parseTextJobs(text) {
+			if (typeof text !== 'string') return null;
+			const trimmed = text.trim();
+			if (trimmed === '') return null;
+			if (trimmed.indexOf('当前没有生成任务') !== -1 || trimmed.indexOf('No generation jobs') !== -1) return [];
+			const jobs = [];
+			for (const line of trimmed.split('\n')) {
+				const m = line.match(/^- ([0-9a-f][0-9a-f-]{7,}) \[([a-zA-Z_]+)\] (\d+)% ([^/\s]+)\/([^\s(]+) \(([a-z]+)\)(.*)$/);
+				if (!m) continue;
+				const job = { id: m[1], status: m[2], progress: Number(m[3]) || 0, backend: m[4], model: m[5], modality: m[6], artifacts: [] };
+				const rest = m[7] || '';
+				const owner = rest.match(/owner=([^\s]+)/);
+				if (owner && owner[1] !== '—' && owner[1] !== '-') job.owner = owner[1];
+				const arts = rest.match(/artifacts=([\s\S]+?)(?= error=\[|$)/);
+				if (arts) {
+					const paths = arts[1].trim();
+					if (paths !== '') job.artifacts = paths.split(', ').filter(Boolean).map((p) => ({ path: p }));
+				}
+				const err = rest.match(/error=\[([A-Z_]+)\]/);
+				if (err) job.error = { code: err[1], message: '' };
+				jobs.push(job);
+			}
+			return jobs.length > 0 ? jobs : null;
+		}
+		/** Prefer the structured JSON payload; fall back to parsing the text output. */
+		function payloadFromCommandResult(result) {
+			if (result && result.json && Array.isArray(result.json.jobs)) return result.json;
+			const parsed = parseTextJobs(result && typeof result.text === 'string' ? result.text : undefined);
+			return parsed !== null ? { jobs: parsed } : { jobs: [] };
+		}
+
 			const { execute, jobsEndpoint, t, sessionId, cwd, visible, onOpenFile, pollMs } = props;
 			const [jobs, setJobs] = react.useState(null);
 			const [downloadBase, setDownloadBase] = react.useState('');
+			/** Download base for artifact links: server value, else the GUI origin. */
+			const effectiveDownloadBase = () => {
+				if (typeof downloadBase === 'string' && downloadBase !== '') return downloadBase;
+				try {
+					if (typeof window !== 'undefined' && window.location && /^https?:$/.test(window.location.protocol)) {
+						return window.location.origin + '/synthmedia/api/artifact';
+					}
+				} catch { /* degraded host */ }
+				return '';
+			};
 			const [err, setErr] = react.useState(null);
 			const [note, setNote] = react.useState(null);
 			const [menu, setMenu] = react.useState(null);
@@ -1373,17 +1424,27 @@ window.__ModuleLoader__.load({
 							// Token rotated by a host restart: fall back for this mount.
 							setTokenStale(true);
 							const result = await withTimeout(run(jobsCommand()), 12000);
-							payload = result && result.json ? result.json : { jobs: [] };
+							payload = payloadFromCommandResult(result);
 						} else {
 							if (!res || !res.ok) throw new Error('http ' + (res ? res.status : '?'));
 							payload = await res.json();
 						}
 					} else {
 						const result = await withTimeout(run(jobsCommand()), 12000);
-						payload = result && result.json ? result.json : { jobs: [] };
+						payload = payloadFromCommandResult(result);
 					}
 					setErr(null);
 					if (payload) {
+						// The command-transport fallback has no downloadBase in its
+						// payload; derive it from the GUI origin — the artifact
+						// route lives on the same webserver (job-UUID fenced).
+						if (typeof payload.downloadBase !== 'string' || payload.downloadBase === '') {
+							try {
+								if (typeof window !== 'undefined' && window.location && /^https?:$/.test(window.location.protocol)) {
+									payload.downloadBase = window.location.origin + '/synthmedia/api/artifact';
+								}
+							} catch { /* degraded host keeps download hidden */ }
+						}
 						setJobs(Array.isArray(payload.jobs) ? payload.jobs : []);
 						setDownloadBase(typeof payload.downloadBase === 'string' ? payload.downloadBase : '');
 					}
@@ -1420,6 +1481,18 @@ window.__ModuleLoader__.load({
 			};
 			const doPreview = (abs) => {
 				if (typeof onOpenFile === 'function') { onOpenFile(abs); return; }
+				// Fallback when the sidebar preview face is absent (e.g. the
+				// conversation 媒体服务 tab): open the artifact through the
+				// same-origin download route — the browser plays mp4 natively.
+				const dl = effectiveDownloadBase();
+				if (dl !== '') {
+					const hit = (Array.isArray(jobs) ? jobs : []).find((j) => Array.isArray(j.artifacts) && j.artifacts.some((a) => String(a.path ?? '') === abs));
+					if (hit) {
+						const file = abs.split(/[\\/]/).pop() ?? '';
+						try { window.open(dl + '/' + hit.id + '/' + encodeURIComponent(file) + '?disposition=inline', '_blank'); return; }
+						catch { /* popup blocked: fall through to copy */ }
+					}
+				}
 				void doCopy(abs).then(() => setNote({ ok: false, text: t('jobs.noPreview') }));
 			};
 			const doReveal = async (jobId) => {

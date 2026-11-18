@@ -91,6 +91,10 @@ test('contract: zgci-h3 /v1/videos task API end-to-end (verified verify_ai_model
 
 test('contract: zgci-h3 missing credential fails BEFORE any network call', async () => {
   delete process.env.SYNTHMEDIA_ZGCI_API_KEY;
+  // Hermetic resolver: the credential-file fallback (real user YAML) would
+  // satisfy the lookup and break the fail-before-network contract.
+  const prevFallback = process.env.SYNTHMEDIA_CREDENTIAL_FILE_FALLBACK;
+  process.env.SYNTHMEDIA_CREDENTIAL_FILE_FALLBACK = '0';
   const { resolveConfig } = await import('../lib/config.js');
   const { createBackendRegistry } = await import('../lib/backends/index.js');
   const { JobManager } = await import('../lib/jobs.js');
@@ -107,6 +111,8 @@ test('contract: zgci-h3 missing credential fails BEFORE any network call', async
     assert.ok(after.error.message.includes('SYNTHMEDIA_ZGCI_API_KEY'), 'error names the env var, never a value');
   } finally {
     server.close();
+    if (prevFallback === undefined) delete process.env.SYNTHMEDIA_CREDENTIAL_FILE_FALLBACK;
+    else process.env.SYNTHMEDIA_CREDENTIAL_FILE_FALLBACK = prevFallback;
     assert.equal(hit, false, 'no request must be sent without credentials');
   }
 });
